@@ -129,7 +129,7 @@ declare interface Image {
     /**
      * Provides access to basic micro:bit functionality.
      */
-    //% color=#1E90FF weight=116 icon="\uf00a"
+    //% color=#0069cf weight=116 icon="\uf00a"
 declare namespace basic {
 
     /**
@@ -205,7 +205,7 @@ declare namespace basic {
 
 
 
-    //% color=#D400D4 weight=111 icon="\uf192"
+    //% color=#a102a1 weight=111 icon="\uf192"
 declare namespace input {
 
     /**

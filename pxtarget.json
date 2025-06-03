@@ -182,7 +182,7 @@
         "mbdal",
         "mbcodal"
     ],
-    "alwaysMultiVariant" : true,
+    "alwaysMultiVariant": true,
     "variants": {
         "mbdal": {
             "compile": {},
@@ -347,12 +347,10 @@
                 "bluetooth",
                 "thermometer",
                 "compass",
-
                 "builtinspeaker",
                 "microphone",
                 "logotouch",
                 "flashlog",
-
                 "v2"
             ],
             "pinStyles": {
@@ -486,14 +484,14 @@
             }
         },
         "blockColors": {
-            "logic": "#00A4A6",
-            "loops": "#00AA00",
+            "logic": "#017274",
+            "loops": "#018201",
             "math": "#9400D3",
             "variables": "#DC143C",
-            "text": "#B8860B",
+            "text": "#805c04",
             "advanced": "#00272B",
             "functions": "#3455DB",
-            "arrays": "#E65722"
+            "arrays": "#c33c0a"
         },
         "defaultColorTheme": "microbit-light",
         "highContrastColorTheme": "pxt-high-contrast",
@@ -578,16 +576,17 @@
         "immersiveReader": true,
         "tutorialCodeValidation": true,
         "downloadDialogTheme": {
-            "webUSBDeviceNames": ["BBC micro:bit CMSIS-DAP", "DAPLink CMSIS-DAP"],
+            "webUSBDeviceNames": [
+                "BBC micro:bit CMSIS-DAP",
+                "DAPLink CMSIS-DAP"
+            ],
             "minimumFirmwareVersion": "0249",
             "deviceIcon": "xicon microbit",
             "deviceSuccessIcon": "xicon microbit-check",
-
-            "downloadMenuHelpURL" : "/device/usb",
-            "downloadHelpURL" : "/device/usb",
+            "downloadMenuHelpURL": "/device/usb",
+            "downloadHelpURL": "/device/usb",
             "troubleshootWebUSBHelpURL": "/device/usb/webusb/troubleshoot",
             "incompatibleHardwareHelpURL": "/device/v2",
-
             "dragFileImage": "/static/download/transfer.png",
             "connectDeviceImage": "/static/download/connect-microbit.gif",
             "disconnectDeviceImage": "/static/download/full-reset.gif",

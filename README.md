@@ -102,6 +102,7 @@ Note the above command assumes the folder structure of
  pxt      pxt-common-packages  pxt-microbit
  ```
 
+
 ### Running
 
 Run this command from inside pxt-microbit to open a local web server
@@ -119,6 +120,13 @@ pxt serve --local
 If you want to speed up the build, you can use the ``rebundle`` option, which skips building and simply refreshes the target information
 ```
 pxt serve --rebundle
+```
+
+### Viewing Changes & Rebuilding
+
+To see any changes you've made in this project locally, you'll need to rebuild the static files in `/built/packaged`:
+```
+pxt staticpkg
 ```
 
 ### Cleaning
