@@ -9,6 +9,7 @@
         "newLine": "LF",
         "moduleResolution": "node",
         "sourceMap": false,
+        "types": [],
         "lib": [
             "dom",
             "dom.iterable",
