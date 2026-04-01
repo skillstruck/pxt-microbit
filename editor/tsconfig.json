@@ -12,6 +12,7 @@
         "rootDir": ".",
         "newLine": "LF",
         "sourceMap": false,
+        "types": [],
         "jsx": "react",
         "lib": [
             "dom",
