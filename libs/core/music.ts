@@ -199,7 +199,6 @@ namespace music {
     //% parts="headphone"
     //% useEnumVal=1
     //% group="Tone"
-    //% deprecated=1
     export function playTone(frequency: number, ms: number): void {
         if (isNaN(frequency) || isNaN(ms)) return;
         if (_playTone) _playTone(frequency, ms);
