@@ -61,13 +61,20 @@ function setupTutorialFullToolbox(projectView: pxt.editor.IProjectView) {
     pv._ssTutorialFullToolboxInterval = setInterval(() => {
         try {
             if (typeof pv.isTutorial !== "function" || !pv.isTutorial()) return;
-            const editorState = pv.state && pv.state.editorState;
-            if (!editorState) return;
-            const filters = editorState.filters;
-            if (!filters || (!filters.blocks && !filters.namespaces)) return;
-            const next = Object.assign({}, editorState);
-            delete next.filters;
-            pv.setState({ editorState: next }, () => {
+            // Cheap stale-state check so we don't fire setState every tick when
+            // there's nothing to clear; the actual update uses the functional
+            // form below so it applies against the latest committed state.
+            const staleEditorState = pv.state && pv.state.editorState;
+            if (!staleEditorState) return;
+            const staleFilters = staleEditorState.filters;
+            if (!staleFilters || (!staleFilters.blocks && !staleFilters.namespaces)) return;
+            pv.setState((prev: any) => {
+                const editorState = prev && prev.editorState;
+                if (!editorState || !editorState.filters) return null;
+                const next = Object.assign({}, editorState);
+                delete next.filters;
+                return { editorState: next };
+            }, () => {
                 try {
                     const ed = pv.editor;
                     if (ed && typeof ed.refreshToolbox === "function") {
