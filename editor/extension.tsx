@@ -57,7 +57,8 @@ pxt.editor.initExtensionsAsync = function (opts: pxt.editor.ExtensionOptions): P
 function setupTutorialFullToolbox(projectView: pxt.editor.IProjectView) {
     if (!projectView) return;
     const pv = projectView as any;
-    setInterval(() => {
+    if (pv._ssTutorialFullToolboxInterval) return;
+    pv._ssTutorialFullToolboxInterval = setInterval(() => {
         try {
             if (typeof pv.isTutorial !== "function" || !pv.isTutorial()) return;
             const editorState = pv.state && pv.state.editorState;
