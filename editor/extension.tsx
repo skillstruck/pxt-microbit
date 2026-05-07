@@ -41,5 +41,45 @@ pxt.editor.initExtensionsAsync = function (opts: pxt.editor.ExtensionOptions): P
     res.mkPacketIOWrapper = flash.mkDAPLinkPacketIOWrapper;
     res.blocklyPatch = patch.patchBlocks;
     res.showProgramTooLargeErrorAsync = dialogs.showProgramTooLargeErrorAsync;
+
+    setupTutorialFullToolbox(opts.projectView);
+
     return Promise.resolve<pxt.editor.ExtensionResult>(res);
+}
+
+// Skill Struck: tutorial mode normally sets editorState.filters.blocks from
+// the tutorial's usedBlocks set, hiding any toolbox category whose blocks
+// aren't referenced in the tutorial markdown — including extensions a student
+// just installed. We poll for that filter while a tutorial is active and clear
+// it, then force the blocks editor to refresh its toolbox so the new deps
+// (e.g. NeoPixel + Sonar) all appear. Step progression and the rest of the
+// tutorial UI are unaffected.
+function setupTutorialFullToolbox(projectView: pxt.editor.IProjectView) {
+    if (!projectView) return;
+    const pv = projectView as any;
+    setInterval(() => {
+        try {
+            if (typeof pv.isTutorial !== "function" || !pv.isTutorial()) return;
+            const editorState = pv.state && pv.state.editorState;
+            if (!editorState) return;
+            const filters = editorState.filters;
+            if (!filters || (!filters.blocks && !filters.namespaces)) return;
+            const next = Object.assign({}, editorState);
+            delete next.filters;
+            pv.setState({ editorState: next }, () => {
+                try {
+                    const ed = pv.editor;
+                    if (ed && typeof ed.refreshToolbox === "function") {
+                        ed.refreshToolbox();
+                    } else if (typeof pv.forceUpdate === "function") {
+                        pv.forceUpdate();
+                    }
+                } catch (e) {
+                    pxt.debug("refreshToolbox after clear failed: " + e);
+                }
+            });
+        } catch (e) {
+            pxt.debug("clearTutorialFilters failed: " + e);
+        }
+    }, 250);
 }
