@@ -41,5 +41,53 @@ pxt.editor.initExtensionsAsync = function (opts: pxt.editor.ExtensionOptions): P
     res.mkPacketIOWrapper = flash.mkDAPLinkPacketIOWrapper;
     res.blocklyPatch = patch.patchBlocks;
     res.showProgramTooLargeErrorAsync = dialogs.showProgramTooLargeErrorAsync;
+
+    setupTutorialFullToolbox(opts.projectView);
+
     return Promise.resolve<pxt.editor.ExtensionResult>(res);
+}
+
+// Skill Struck: tutorial mode normally sets editorState.filters.blocks from
+// the tutorial's usedBlocks set, hiding any toolbox category whose blocks
+// aren't referenced in the tutorial markdown — including extensions a student
+// just installed. We poll for that filter while a tutorial is active and clear
+// it, then force the blocks editor to refresh its toolbox so the new deps
+// (e.g. NeoPixel + Sonar) all appear. Step progression and the rest of the
+// tutorial UI are unaffected.
+function setupTutorialFullToolbox(projectView: pxt.editor.IProjectView) {
+    if (!projectView) return;
+    const pv = projectView as any;
+    if (pv._ssTutorialFullToolboxInterval) return;
+    pv._ssTutorialFullToolboxInterval = setInterval(() => {
+        try {
+            if (typeof pv.isTutorial !== "function" || !pv.isTutorial()) return;
+            // Cheap stale-state check so we don't fire setState every tick when
+            // there's nothing to clear; the actual update uses the functional
+            // form below so it applies against the latest committed state.
+            const staleEditorState = pv.state && pv.state.editorState;
+            if (!staleEditorState) return;
+            const staleFilters = staleEditorState.filters;
+            if (!staleFilters || (!staleFilters.blocks && !staleFilters.namespaces)) return;
+            pv.setState((prev: any) => {
+                const editorState = prev && prev.editorState;
+                if (!editorState || !editorState.filters) return null;
+                const next = Object.assign({}, editorState);
+                delete next.filters;
+                return { editorState: next };
+            }, () => {
+                try {
+                    const ed = pv.editor;
+                    if (ed && typeof ed.refreshToolbox === "function") {
+                        ed.refreshToolbox();
+                    } else if (typeof pv.forceUpdate === "function") {
+                        pv.forceUpdate();
+                    }
+                } catch (e) {
+                    pxt.debug("refreshToolbox after clear failed: " + e);
+                }
+            });
+        } catch (e) {
+            pxt.debug("clearTutorialFilters failed: " + e);
+        }
+    }, 250);
 }
