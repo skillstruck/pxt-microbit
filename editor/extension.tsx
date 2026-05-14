@@ -44,6 +44,7 @@ pxt.editor.initExtensionsAsync = function (opts: pxt.editor.ExtensionOptions): P
 
     setupTutorialFullToolbox(opts.projectView);
     setupGhSearchFallback();
+    setupGitHubRepoFallback();
 
     return Promise.resolve<pxt.editor.ExtensionResult>(res);
 }
@@ -169,4 +170,61 @@ function synthesizeGhSearchResponse(url: string): Promise<{ items: any[] }> {
         },
         () => ({ items: [] as any[] })
     );
+}
+
+// Skill Struck: pxt.github.searchAsync fast-paths a slug-list query (which is
+// what the Extensions home view sends — every preferred slug joined by `|`)
+// through pxt.github.repoAsync per slug, NEVER hitting the ghsearch endpoint
+// the previous setupGhSearchFallback() handles. repoAsync delegates to a proxy
+// at `${apiRoot}gh/<owner>/<repo>`; when that proxy can't answer for a slug
+// (404, SPA fallback, missing org, etc.) the helper resolves to undefined and
+// the tile silently disappears — that's the home-view symptom on the hosted
+// editor even though approvedRepoLib has every kit package.
+//
+// Patch repoAsync to keep the proxy path as the primary source (so real
+// metadata still flows through when available) and only synthesize a minimal
+// repo object from approvedRepoLib when the proxy returns nothing.
+function setupGitHubRepoFallback() {
+    const github: any = (pxt as any).github;
+    if (!github || typeof github.repoAsync !== "function") return;
+    if (github._ssRepoFallbackPatched) return;
+    github._ssRepoFallbackPatched = true;
+    const orig = github.repoAsync;
+    github.repoAsync = async function (repopath: string, config: any) {
+        let result: any;
+        try {
+            result = await orig.call(github, repopath, config);
+        } catch (e) {
+            result = undefined;
+        }
+        if (result) return result;
+        return synthesizeRepoFromApprovedLib(repopath, config);
+    };
+}
+
+function synthesizeRepoFromApprovedLib(repopath: string, config: any): any {
+    if (!repopath || !config) return undefined;
+    const lib = config.approvedRepoLib;
+    if (!lib) return undefined;
+    const cleaned = String(repopath).split("#")[0].split("?")[0];
+    const parts = cleaned.split("/").filter(Boolean);
+    if (parts.length < 2) return undefined;
+    const owner = parts[0];
+    const name = parts[1];
+    const fullName = owner + "/" + name;
+    const needle = fullName.toLowerCase();
+    const matched = Object.keys(lib).filter(k => k.toLowerCase() === needle)[0];
+    if (!matched) return undefined;
+    return {
+        github: true,
+        owner: owner.toLowerCase(),
+        fullName: matched,
+        fileName: undefined,
+        slug: matched.toLowerCase(),
+        name: name,
+        description: "",
+        defaultBranch: "master",
+        tag: undefined,
+        status: 1  // pxt.github.GitRepoStatus.Approved
+    };
 }
