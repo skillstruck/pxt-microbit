@@ -43,6 +43,7 @@ pxt.editor.initExtensionsAsync = function (opts: pxt.editor.ExtensionOptions): P
     res.showProgramTooLargeErrorAsync = dialogs.showProgramTooLargeErrorAsync;
 
     setupTutorialFullToolbox(opts.projectView);
+    setupGhSearchFallback();
 
     return Promise.resolve<pxt.editor.ExtensionResult>(res);
 }
@@ -90,4 +91,82 @@ function setupTutorialFullToolbox(projectView: pxt.editor.IProjectView) {
             pxt.debug("clearTutorialFilters failed: " + e);
         }
     }, 250);
+}
+
+// Skill Struck: the static-pack editor calls `${apiRoot}ghsearch/<target>/<platform>?q=<query>`
+// to populate the Extensions panel home view (preferred slugs joined by `|`) and the user-typed
+// search results. In production `apiRoot` resolves to `/api/` (pxt.Cloud.apiRoot falls back to
+// `/api/` when not on localhost), so the request hits the hosted edge router. That router
+// implements `/api/gh/<owner>/<repo>/...` for individual package metadata but NOT
+// `/api/ghsearch/`, so the SPA catch-all returns the editor's index.html with HTTP 200. The
+// JSON parse fails, the extensions code treats it as empty, and every external approvedRepoLib
+// repo (neopixel, sonar, oled, maqueen, cutebot, microturtle, ...) silently vanishes from the
+// panel while bundled libs still render.
+//
+// Patch httpGetJsonAsync to intercept ghsearch URLs: if the real response doesn't come back as
+// a usable items array, synthesize one from the already-loaded approvedRepoLib so the panel
+// can render tiles. Individual repo metadata still comes through the real /api/gh/ proxy.
+function setupGhSearchFallback() {
+    const U: any = (pxt as any).U || (pxt as any).Util;
+    if (!U || typeof U.httpGetJsonAsync !== "function") return;
+    if (U._ssGhSearchPatched) return;
+    U._ssGhSearchPatched = true;
+    const orig = U.httpGetJsonAsync;
+    U.httpGetJsonAsync = function (url: string): Promise<any> {
+        if (typeof url !== "string" || !/\/api\/ghsearch\//.test(url)) {
+            return orig.call(U, url);
+        }
+        return orig.call(U, url).then(
+            (resp: any) => {
+                if (resp && Array.isArray(resp.items)) return resp;
+                return synthesizeGhSearchResponse(url);
+            },
+            () => synthesizeGhSearchResponse(url)
+        );
+    };
+}
+
+function synthesizeGhSearchResponse(url: string): Promise<{ items: any[] }> {
+    const m = url.match(/[?&]q=([^&]+)/);
+    if (!m) return Promise.resolve({ items: [] });
+    let query = "";
+    try {
+        query = decodeURIComponent(m[1]);
+    } catch (e) {
+        query = m[1];
+    }
+    const terms = query.split("|").map(s => s.trim()).filter(Boolean);
+    if (!terms.length) return Promise.resolve({ items: [] });
+    return (pxt as any).targetConfigAsync().then(
+        (cfg: any) => {
+            const lib = cfg && cfg.packages && cfg.packages.approvedRepoLib;
+            if (!lib) return { items: [] };
+            const entries = Object.keys(lib).map(k => ({ slug: k, meta: lib[k] || {} }));
+            const matched: { [slug: string]: { slug: string; meta: any } } = {};
+            for (const term of terms) {
+                const needle = term.toLowerCase();
+                const exact = entries.filter(e => e.slug.toLowerCase() === needle)[0];
+                if (exact) {
+                    matched[exact.slug] = exact;
+                    continue;
+                }
+                for (const e of entries) {
+                    const repoPart = (e.slug.split("/")[1] || e.slug).toLowerCase();
+                    if (repoPart.indexOf(needle) >= 0) matched[e.slug] = e;
+                }
+            }
+            const items = Object.keys(matched).map(slug => ({
+                full_name: slug,
+                name: slug.split("/")[1] || slug,
+                description: "",
+                default_branch: "master",
+                private: false,
+                fork: false,
+                updated_at: new Date(0).toISOString(),
+                stargazers_count: 0
+            }));
+            return { items };
+        },
+        () => ({ items: [] as any[] })
+    );
 }
