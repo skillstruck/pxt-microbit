@@ -195,6 +195,7 @@ function setupGitHubRepoFallback() {
         try {
             result = await orig.call(github, repopath, config);
         } catch (e) {
+            pxt.debug("repoAsync proxy failed for " + repopath + ", falling back: " + e);
             result = undefined;
         }
         if (result) return result;
@@ -225,6 +226,6 @@ function synthesizeRepoFromApprovedLib(repopath: string, config: any): any {
         description: "",
         defaultBranch: "master",
         tag: undefined,
-        status: 1  // pxt.github.GitRepoStatus.Approved
+        status: pxt.github.GitRepoStatus.Approved
     };
 }
