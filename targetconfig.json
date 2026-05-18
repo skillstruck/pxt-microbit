@@ -1,4 +1,9 @@
 {
+    "releases": {
+        "v7": [
+            "DFRobot/pxt-maqueen#v1.7.16"
+        ]
+    },
     "packages": {
         "approvedRepoLib": {
             "microsoft/pxt-neopixel": {
