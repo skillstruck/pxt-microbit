@@ -45,6 +45,7 @@ pxt.editor.initExtensionsAsync = function (opts: pxt.editor.ExtensionOptions): P
     setupTutorialFullToolbox(opts.projectView);
     setupGhSearchFallback();
     setupGitHubRepoFallback();
+    setupGitHubSearchFallback();
 
     return Promise.resolve<pxt.editor.ExtensionResult>(res);
 }
@@ -227,5 +228,78 @@ function synthesizeRepoFromApprovedLib(repopath: string, config: any): any {
         defaultBranch: "master",
         tag: undefined,
         status: pxt.github.GitRepoStatus.Approved
+    };
+}
+
+// Skill Struck: setupGitHubRepoFallback patches the namespace-level
+// pxt.github.repoAsync, but pxt.github.searchAsync's body references repoAsync
+// via *closure binding* to the local function declaration — not via
+// pxt.github.repoAsync. So when the data provider calls
+// pxt.github.searchAsync('slug1|slug2|...', packages) for the Extensions panel
+// home view, the per-slug repoAsync calls go through the unpatched closure
+// reference, return undefined for whatever the hosted proxy can't answer for,
+// and the final filter drops them. Result: searchAsync returns 0 items even
+// though approvedRepoLib has every preferred slug and the namespace-level
+// repoAsync patch correctly returns synthesized objects when called directly.
+//
+// Wrap pxt.github.searchAsync itself (which the data provider DOES access by
+// property lookup) and patch up missing entries from approvedRepoLib after
+// the original runs. Slug-list queries (home view) get exact-match synthesis;
+// free-text queries (search bar like "neo") get substring-match synthesis
+// against repo names. When the original returns valid items (e.g., on local
+// dev hitting makecode.com), they pass through unchanged.
+function setupGitHubSearchFallback() {
+    const github: any = (pxt as any).github;
+    if (!github || typeof github.searchAsync !== "function") return;
+    if (github._ssSearchFallbackPatched) return;
+    github._ssSearchFallbackPatched = true;
+    const orig = github.searchAsync;
+    github.searchAsync = async function (query: string, config: any) {
+        let result: any[] = [];
+        try {
+            const r = await orig.call(github, query, config);
+            if (Array.isArray(r)) result = r;
+        } catch (e) {
+            pxt.debug("searchAsync original failed, falling back: " + e);
+            result = [];
+        }
+        if (!query || !config || !config.approvedRepoLib) return result;
+
+        const got: { [k: string]: boolean } = {};
+        for (const r of result) {
+            if (r && r.fullName) got[String(r.fullName).toLowerCase()] = true;
+        }
+
+        const lib = config.approvedRepoLib;
+        const libSlugs = Object.keys(lib);
+        const terms = String(query).split("|").map(s => s.trim()).filter(Boolean);
+
+        for (const term of terms) {
+            const synth = synthesizeRepoFromApprovedLib(term, config);
+            if (synth) {
+                const key = String(synth.fullName).toLowerCase();
+                if (!got[key]) {
+                    result.push(synth);
+                    got[key] = true;
+                }
+                continue;
+            }
+            // No exact slug match — treat as free text and substring-match
+            // against the repo half of each approved slug.
+            const needle = term.toLowerCase();
+            for (const slug of libSlugs) {
+                if (got[slug.toLowerCase()]) continue;
+                const repoPart = (slug.split("/")[1] || slug).toLowerCase();
+                if (repoPart.indexOf(needle) >= 0) {
+                    const s = synthesizeRepoFromApprovedLib(slug, config);
+                    if (s) {
+                        const key = String(s.fullName).toLowerCase();
+                        result.push(s);
+                        got[key] = true;
+                    }
+                }
+            }
+        }
+        return result;
     };
 }
