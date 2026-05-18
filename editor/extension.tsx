@@ -256,50 +256,70 @@ function setupGitHubSearchFallback() {
     const orig = github.searchAsync;
     github.searchAsync = async function (query: string, config: any) {
         let result: any[] = [];
+        let originalError: any = null;
         try {
             const r = await orig.call(github, query, config);
             if (Array.isArray(r)) result = r;
         } catch (e) {
-            pxt.debug("searchAsync original failed, falling back: " + e);
-            result = [];
+            pxt.debug("searchAsync original failed, attempting fallback: " + e);
+            originalError = e;
         }
-        if (!query || !config || !config.approvedRepoLib) return result;
-
-        const got: { [k: string]: boolean } = {};
-        for (const r of result) {
-            if (r && r.fullName) got[String(r.fullName).toLowerCase()] = true;
+        // No fallback data available — preserve the original promise outcome
+        // so the data provider's .catch(handleNetworkError) still fires.
+        if (!query || !config || !config.approvedRepoLib) {
+            if (originalError) throw originalError;
+            return result;
         }
 
         const lib = config.approvedRepoLib;
         const libSlugs = Object.keys(lib);
         const terms = String(query).split("|").map(s => s.trim()).filter(Boolean);
 
+        // Index whatever the original returned so we can prefer its richer
+        // metadata over a synthesized stub when both are available for the
+        // same slug.
+        const bySlug: { [k: string]: any } = {};
+        for (const r of result) {
+            if (r && r.fullName) bySlug[String(r.fullName).toLowerCase()] = r;
+        }
+
+        // Build the final array in query/terms order rather than mutating the
+        // original in place — keeps curated-tile sequence intact for partial
+        // upstream hits.
+        const ordered: any[] = [];
+        const seen: { [k: string]: boolean } = {};
+        const emit = (repo: any) => {
+            if (!repo || !repo.fullName) return;
+            const key = String(repo.fullName).toLowerCase();
+            if (seen[key]) return;
+            ordered.push(repo);
+            seen[key] = true;
+        };
+
         for (const term of terms) {
             const synth = synthesizeRepoFromApprovedLib(term, config);
             if (synth) {
                 const key = String(synth.fullName).toLowerCase();
-                if (!got[key]) {
-                    result.push(synth);
-                    got[key] = true;
-                }
+                emit(bySlug[key] || synth);
                 continue;
             }
-            // No exact slug match — treat as free text and substring-match
-            // against the repo half of each approved slug.
+            // Free-text term — substring-match against the repo half of each
+            // approved slug, emitting matches for this term before moving on.
             const needle = term.toLowerCase();
             for (const slug of libSlugs) {
-                if (got[slug.toLowerCase()]) continue;
+                const key = slug.toLowerCase();
+                if (seen[key]) continue;
                 const repoPart = (slug.split("/")[1] || slug).toLowerCase();
                 if (repoPart.indexOf(needle) >= 0) {
-                    const s = synthesizeRepoFromApprovedLib(slug, config);
-                    if (s) {
-                        const key = String(s.fullName).toLowerCase();
-                        result.push(s);
-                        got[key] = true;
-                    }
+                    emit(bySlug[key] || synthesizeRepoFromApprovedLib(slug, config));
                 }
             }
         }
-        return result;
+        // Defensive: surface any original results not requested via terms so
+        // we never strictly subtract from the upstream response.
+        for (const r of result) emit(r);
+
+        if (!ordered.length && originalError) throw originalError;
+        return ordered;
     };
 }
