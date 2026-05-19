@@ -46,6 +46,8 @@ pxt.editor.initExtensionsAsync = function (opts: pxt.editor.ExtensionOptions): P
     setupGhSearchFallback();
     setupGitHubRepoFallback();
     setupGitHubSearchFallback();
+    setupGitHubLoadPackageFallback();
+    setupGitHubIconFallback();
 
     return Promise.resolve<pxt.editor.ExtensionResult>(res);
 }
@@ -322,4 +324,106 @@ function setupGitHubSearchFallback() {
         if (!ordered.length && originalError) throw originalError;
         return ordered;
     };
+}
+
+// Skill Struck: install of an external extension calls
+// pxt.github.db.loadPackageAsync, which first tries the hosted proxy via
+// proxyWithCdnLoadPackageAsync (`/api/gh/<owner>/<repo>/<tag>/text`). When
+// the proxy returns nothing for a slug it does NOT throw — it resolves with
+// `{ files: undefined }`, the outer loadPackageAsync's catch never fires,
+// the malformed value gets cached, and downstream `Object.keys(undefined)`
+// in MakeCode's setFiles crashes the install with:
+//
+//   TypeError: Cannot convert undefined or null to object
+//     at Object.keys → n.mapMap → h.setFiles → MainPackage.loadAsync
+//
+// Wrap proxyWithCdnLoadPackageAsync: if the proxy returns something
+// missing or empty, fall back to fetching files directly from jsDelivr's
+// GitHub CDN (cdn.jsdelivr.net/gh/<owner>/<repo>@<tag>/<file>), which
+// proxies raw.githubusercontent.com without rate limits and is allowed
+// under most CSP/COEP configurations. The proxy's real response still
+// wins when it works, so working repos stay untouched.
+function setupGitHubLoadPackageFallback() {
+    const github: any = (pxt as any).github;
+    if (!github || !github.db || typeof github.db.proxyWithCdnLoadPackageAsync !== "function") return;
+    if (github.db._ssLoadPkgPatched) return;
+    github.db._ssLoadPkgPatched = true;
+    const db = github.db;
+    const orig = db.proxyWithCdnLoadPackageAsync.bind(db);
+    db.proxyWithCdnLoadPackageAsync = async function (repopath: string, tag: string) {
+        let result: any;
+        try {
+            result = await orig(repopath, tag);
+        } catch (e) {
+            pxt.debug("proxyWithCdnLoadPackageAsync failed for " + repopath + "@" + tag + ", falling back: " + e);
+            result = undefined;
+        }
+        if (result && result.files && typeof result.files === "object" && Object.keys(result.files).length > 0) {
+            return result;
+        }
+        pxt.debug("proxy returned empty package for " + repopath + "@" + tag + ", fetching from jsDelivr");
+        return fetchPackageFromJsDelivr(repopath, tag);
+    };
+}
+
+// Skill Struck: Extensions panel tiles use pxt.github.mkRepoIconUrl(repo) to
+// build the <img src=…>, which by default points at the hosted proxy's
+// /api/gh/<owner>/<repo>/icon endpoint. The hosted proxy doesn't serve that
+// endpoint for the repos it can't proxy, so every external preferred tile
+// renders with Chrome's generic broken-image placeholder.
+//
+// Redirect icon URLs to jsDelivr's GitHub CDN. Image src is synchronous so
+// there's no clean "try proxy first, fall back" pattern — we just always
+// use jsDelivr, which works equally well for both local and hosted setups
+// (jsDelivr serves any public-repo file, and all six kit packages we care
+// about have icon.png at master). If a repo doesn't have icon.png the tile
+// still renders broken, but no worse than the current state.
+function setupGitHubIconFallback() {
+    const github: any = (pxt as any).github;
+    if (!github || typeof github.mkRepoIconUrl !== "function") return;
+    if (github._ssIconPatched) return;
+    github._ssIconPatched = true;
+    github.mkRepoIconUrl = function (repo: any) {
+        if (!repo || !repo.fullName) return undefined;
+        const ref = repo.tag || repo.defaultBranch || "master";
+        return `https://cdn.jsdelivr.net/gh/${repo.fullName}@${ref}/icon.png`;
+    };
+}
+
+async function fetchPackageFromJsDelivr(repopath: string, tag: string): Promise<{ files: { [k: string]: string } }> {
+    const ref = tag || "master";
+    const slug = String(repopath);
+    const base = `https://cdn.jsdelivr.net/gh/${slug}@${ref}`;
+    const configName = (pxt as any).CONFIG_NAME || "pxt.json";
+
+    // 1. Fetch pxt.json to learn which files this package ships.
+    const configResp = await fetch(`${base}/${configName}`);
+    if (!configResp.ok) {
+        throw new Error(`jsDelivr ${configName} fetch failed for ${slug}@${ref}: HTTP ${configResp.status}`);
+    }
+    const configText = await configResp.text();
+    let parsed: any;
+    try {
+        parsed = JSON.parse(configText);
+    } catch (e) {
+        throw new Error(`jsDelivr ${configName} parse failed for ${slug}@${ref}: ${e}`);
+    }
+
+    // 2. Fetch each declared file (and testFiles, since MakeCode reads both).
+    const declared: string[] = [];
+    if (Array.isArray(parsed.files)) declared.push(...parsed.files);
+    if (Array.isArray(parsed.testFiles)) declared.push(...parsed.testFiles);
+
+    const files: { [k: string]: string } = { [configName]: configText };
+    await Promise.all(declared.map(async (name) => {
+        if (files[name]) return; // already have it (configName, dedupe)
+        try {
+            const r = await fetch(`${base}/${encodeURI(name)}`);
+            if (r.ok) files[name] = await r.text();
+            else pxt.debug(`jsDelivr file ${name} HTTP ${r.status} for ${slug}@${ref}`);
+        } catch (e) {
+            pxt.debug(`jsDelivr file ${name} fetch failed for ${slug}@${ref}: ${e}`);
+        }
+    }));
+    return { files };
 }
