@@ -47,6 +47,7 @@ pxt.editor.initExtensionsAsync = function (opts: pxt.editor.ExtensionOptions): P
     setupGitHubRepoFallback();
     setupGitHubSearchFallback();
     setupGitHubLoadPackageFallback();
+    setupGitHubIconFallback();
 
     return Promise.resolve<pxt.editor.ExtensionResult>(res);
 }
@@ -362,6 +363,30 @@ function setupGitHubLoadPackageFallback() {
         }
         pxt.debug("proxy returned empty package for " + repopath + "@" + tag + ", fetching from jsDelivr");
         return fetchPackageFromJsDelivr(repopath, tag);
+    };
+}
+
+// Skill Struck: Extensions panel tiles use pxt.github.mkRepoIconUrl(repo) to
+// build the <img src=…>, which by default points at the hosted proxy's
+// /api/gh/<owner>/<repo>/icon endpoint. The hosted proxy doesn't serve that
+// endpoint for the repos it can't proxy, so every external preferred tile
+// renders with Chrome's generic broken-image placeholder.
+//
+// Redirect icon URLs to jsDelivr's GitHub CDN. Image src is synchronous so
+// there's no clean "try proxy first, fall back" pattern — we just always
+// use jsDelivr, which works equally well for both local and hosted setups
+// (jsDelivr serves any public-repo file, and all six kit packages we care
+// about have icon.png at master). If a repo doesn't have icon.png the tile
+// still renders broken, but no worse than the current state.
+function setupGitHubIconFallback() {
+    const github: any = (pxt as any).github;
+    if (!github || typeof github.mkRepoIconUrl !== "function") return;
+    if (github._ssIconPatched) return;
+    github._ssIconPatched = true;
+    github.mkRepoIconUrl = function (repo: any) {
+        if (!repo || !repo.fullName) return undefined;
+        const ref = repo.tag || repo.defaultBranch || "master";
+        return `https://cdn.jsdelivr.net/gh/${repo.fullName}@${ref}/icon.png`;
     };
 }
 
