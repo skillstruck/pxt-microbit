@@ -444,28 +444,42 @@ function installLoadPackageWrap(db: any) {
     };
 }
 
-// Skill Struck: Extensions panel tiles use pxt.github.mkRepoIconUrl(repo) to
-// build the <img src=…>, which by default points at the hosted proxy's
-// /api/gh/<owner>/<repo>/icon endpoint. The hosted proxy doesn't serve that
-// endpoint for the repos it can't proxy, so every external preferred tile
-// renders with Chrome's generic broken-image placeholder.
+// Skill Struck: Extensions panel tiles compute <img src=…> via
+// pxt.github.repoIconUrl(repo), which by default routes through
+// `${cdnApiUrl}/gh/<owner>/<repo>/icon`. The hosted proxy doesn't serve that
+// endpoint for the repos it can't proxy, so every external tile renders with
+// Chrome's broken-image placeholder.
 //
-// Redirect icon URLs to jsDelivr's GitHub CDN. Image src is synchronous so
-// there's no clean "try proxy first, fall back" pattern — we just always
-// use jsDelivr, which works equally well for both local and hosted setups
-// (jsDelivr serves any public-repo file, and all six kit packages we care
-// about have icon.png at master). If a repo doesn't have icon.png the tile
-// still renders broken, but no worse than the current state.
+// First attempt patched pxt.github.mkRepoIconUrl, but pxt-core's repoIconUrl
+// references mkRepoIconUrl via closure binding (the local function declared
+// in the same scope) — same pattern that bit searchAsync vs repoAsync.
+// Namespace property override doesn't intercept closure-bound calls. Wrap
+// pxt.github.repoIconUrl itself (which IS what callers like the Extensions
+// panel access via property lookup) and synthesize a jsDelivr URL directly.
+// Image src is synchronous so there's no clean "try proxy first, fall back"
+// pattern — we just always go to jsDelivr, which serves any public GitHub
+// file with no rate limits.
 function setupGitHubIconFallback() {
     const github: any = (pxt as any).github;
-    if (!github || typeof github.mkRepoIconUrl !== "function") return;
+    if (!github || typeof github.repoIconUrl !== "function") return;
     if (github._ssIconPatched) return;
     github._ssIconPatched = true;
-    github.mkRepoIconUrl = function (repo: any) {
+    // Also override mkRepoIconUrl on the namespace for any consumer that
+    // somehow accesses it via property lookup; harmless if nothing does.
+    github.mkRepoIconUrl = buildJsDelivrIconUrl;
+    github.repoIconUrl = function (repo: any) {
         if (!repo || !repo.fullName) return undefined;
-        const ref = repo.tag || repo.defaultBranch || "master";
-        return `https://cdn.jsdelivr.net/gh/${repo.fullName}@${ref}/icon.png`;
+        // Approval check is still enforced — same as the original.
+        const ApprovedStatus = github.GitRepoStatus && github.GitRepoStatus.Approved;
+        if (ApprovedStatus != null && repo.status !== ApprovedStatus) return undefined;
+        return buildJsDelivrIconUrl(repo);
     };
+}
+
+function buildJsDelivrIconUrl(repo: any): string | undefined {
+    if (!repo || !repo.fullName) return undefined;
+    const ref = repo.tag || repo.defaultBranch || "master";
+    return `https://cdn.jsdelivr.net/gh/${repo.fullName}@${ref}/icon.png`;
 }
 
 async function fetchPackageFromJsDelivr(repopath: string, tag: string): Promise<{ files: { [k: string]: string } }> {
