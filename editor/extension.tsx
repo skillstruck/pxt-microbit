@@ -46,6 +46,7 @@ pxt.editor.initExtensionsAsync = function (opts: pxt.editor.ExtensionOptions): P
     setupGhSearchFallback();
     setupGitHubRepoFallback();
     setupGitHubSearchFallback();
+    setupGitHubLatestVersionFallback();
     setupGitHubLoadPackageFallback();
     setupGitHubIconFallback();
     setupGitHubDownloadPackageGuard();
@@ -340,6 +341,58 @@ function setupGitHubSearchFallback() {
 //   TypeError: Cannot convert undefined or null to object
 //     at Object.keys → n.mapMap → h.setFiles → MainPackage.loadAsync
 //
+// Skill Struck: pxt.github.latestVersionAsync resolves an unpinned
+// `github:owner/repo` URL into a specific tag by calling listRefsExtAsync
+// against the proxy. On hosted, that endpoint returns empty/404 for the
+// repos the proxy can't serve (e.g., microsoft/*), so latestVersionAsync
+// resolves to undefined. Callers then template-stringify into
+// `repoWithTag = "owner/repo#" + undefined`, producing "owner/repo#undefined"
+// which propagates downstream — and was the @undefined we saw in the
+// jsDelivr URL during testing.
+//
+// Wrap latestVersionAsync to give a usable answer when the underlying ref
+// listing can't: prefer the original's result, otherwise consult
+// config.releases.v<major> for a per-repo pin, otherwise fall back to
+// "master". Same defensive pattern as the other wraps — pass-through when
+// real data is available, synthesize when it isn't.
+function setupGitHubLatestVersionFallback() {
+    const github: any = (pxt as any).github;
+    if (!github || typeof github.latestVersionAsync !== "function") return;
+    if (github._ssLatestVersionPatched) return;
+    github._ssLatestVersionPatched = true;
+    const orig = github.latestVersionAsync;
+    github.latestVersionAsync = async function (repopath: string, config: any, useProxy?: boolean, noCache?: boolean) {
+        let result: any;
+        try {
+            result = await orig.call(github, repopath, config, useProxy, noCache);
+        } catch (e) {
+            pxt.debug("latestVersionAsync original failed for " + repopath + ": " + e);
+        }
+        if (result && typeof result === "string" && result !== "undefined" && result !== "null") {
+            return result;
+        }
+        const parsed = github.parseRepoId(repopath);
+        if (parsed && config) {
+            const targetVer = (pxt as any).appTarget && (pxt as any).appTarget.versions && (pxt as any).appTarget.versions.target;
+            const major = typeof targetVer === "string" ? targetVer.split(".")[0] : "";
+            const releaseList = major && config.releases && config.releases["v" + major];
+            if (Array.isArray(releaseList)) {
+                for (const releaseStr of releaseList) {
+                    const release = github.parseRepoId(releaseStr);
+                    if (release && release.fullName && parsed.fullName
+                        && release.fullName.toLowerCase() === parsed.fullName.toLowerCase()
+                        && release.tag) {
+                        pxt.debug(`latestVersionAsync fallback: pinned ${parsed.fullName} to ${release.tag} (releases.v${major})`);
+                        return release.tag;
+                    }
+                }
+            }
+        }
+        pxt.debug(`latestVersionAsync fallback: no tag found for ${repopath}, defaulting to master`);
+        return "master";
+    };
+}
+
 // Wrap proxyWithCdnLoadPackageAsync: if the proxy returns something
 // missing or empty, fall back to fetching files directly from jsDelivr's
 // GitHub CDN (cdn.jsdelivr.net/gh/<owner>/<repo>@<tag>/<file>), which
@@ -348,10 +401,32 @@ function setupGitHubSearchFallback() {
 // wins when it works, so working repos stay untouched.
 function setupGitHubLoadPackageFallback() {
     const github: any = (pxt as any).github;
-    if (!github || !github.db || typeof github.db.proxyWithCdnLoadPackageAsync !== "function") return;
-    if (github.db._ssLoadPkgPatched) return;
-    github.db._ssLoadPkgPatched = true;
-    const db = github.db;
+    if (!github) return;
+    // pxt.github.db is initialized lazily by the workspace; if it's not on the
+    // namespace yet at initExtensionsAsync time we'd silently no-op and the
+    // wrap would never install. Retry on a short interval until db.proxyWithCdnLoadPackageAsync
+    // exists, then install the wrap exactly once.
+    if (github._ssLoadPkgRetrying) return;
+    github._ssLoadPkgRetrying = true;
+    let attempts = 0;
+    const tryInstall = () => {
+        if (github.db && typeof github.db.proxyWithCdnLoadPackageAsync === "function" && !github.db._ssLoadPkgPatched) {
+            installLoadPackageWrap(github.db);
+            github._ssLoadPkgRetrying = false;
+            return;
+        }
+        if (++attempts > 200) { // ~50s @ 250ms
+            pxt.debug("setupGitHubLoadPackageFallback: gave up waiting for github.db");
+            github._ssLoadPkgRetrying = false;
+            return;
+        }
+        setTimeout(tryInstall, 250);
+    };
+    tryInstall();
+}
+
+function installLoadPackageWrap(db: any) {
+    db._ssLoadPkgPatched = true;
     const orig = db.proxyWithCdnLoadPackageAsync.bind(db);
     db.proxyWithCdnLoadPackageAsync = async function (repopath: string, tag: string) {
         let result: any;
@@ -369,28 +444,42 @@ function setupGitHubLoadPackageFallback() {
     };
 }
 
-// Skill Struck: Extensions panel tiles use pxt.github.mkRepoIconUrl(repo) to
-// build the <img src=…>, which by default points at the hosted proxy's
-// /api/gh/<owner>/<repo>/icon endpoint. The hosted proxy doesn't serve that
-// endpoint for the repos it can't proxy, so every external preferred tile
-// renders with Chrome's generic broken-image placeholder.
+// Skill Struck: Extensions panel tiles compute <img src=…> via
+// pxt.github.repoIconUrl(repo), which by default routes through
+// `${cdnApiUrl}/gh/<owner>/<repo>/icon`. The hosted proxy doesn't serve that
+// endpoint for the repos it can't proxy, so every external tile renders with
+// Chrome's broken-image placeholder.
 //
-// Redirect icon URLs to jsDelivr's GitHub CDN. Image src is synchronous so
-// there's no clean "try proxy first, fall back" pattern — we just always
-// use jsDelivr, which works equally well for both local and hosted setups
-// (jsDelivr serves any public-repo file, and all six kit packages we care
-// about have icon.png at master). If a repo doesn't have icon.png the tile
-// still renders broken, but no worse than the current state.
+// First attempt patched pxt.github.mkRepoIconUrl, but pxt-core's repoIconUrl
+// references mkRepoIconUrl via closure binding (the local function declared
+// in the same scope) — same pattern that bit searchAsync vs repoAsync.
+// Namespace property override doesn't intercept closure-bound calls. Wrap
+// pxt.github.repoIconUrl itself (which IS what callers like the Extensions
+// panel access via property lookup) and synthesize a jsDelivr URL directly.
+// Image src is synchronous so there's no clean "try proxy first, fall back"
+// pattern — we just always go to jsDelivr, which serves any public GitHub
+// file with no rate limits.
 function setupGitHubIconFallback() {
     const github: any = (pxt as any).github;
-    if (!github || typeof github.mkRepoIconUrl !== "function") return;
+    if (!github || typeof github.repoIconUrl !== "function") return;
     if (github._ssIconPatched) return;
     github._ssIconPatched = true;
-    github.mkRepoIconUrl = function (repo: any) {
+    // Also override mkRepoIconUrl on the namespace for any consumer that
+    // somehow accesses it via property lookup; harmless if nothing does.
+    github.mkRepoIconUrl = buildJsDelivrIconUrl;
+    github.repoIconUrl = function (repo: any) {
         if (!repo || !repo.fullName) return undefined;
-        const ref = repo.tag || repo.defaultBranch || "master";
-        return `https://cdn.jsdelivr.net/gh/${repo.fullName}@${ref}/icon.png`;
+        // Approval check is still enforced — same as the original.
+        const ApprovedStatus = github.GitRepoStatus && github.GitRepoStatus.Approved;
+        if (ApprovedStatus != null && repo.status !== ApprovedStatus) return undefined;
+        return buildJsDelivrIconUrl(repo);
     };
+}
+
+function buildJsDelivrIconUrl(repo: any): string | undefined {
+    if (!repo || !repo.fullName) return undefined;
+    const ref = repo.tag || repo.defaultBranch || "master";
+    return `https://cdn.jsdelivr.net/gh/${repo.fullName}@${ref}/icon.png`;
 }
 
 async function fetchPackageFromJsDelivr(repopath: string, tag: string): Promise<{ files: { [k: string]: string } }> {
@@ -471,9 +560,20 @@ function setupGitHubDownloadPackageGuard() {
         pxt.debug("downloadPackageAsync empty for " + repoWithTag + ", refetching via jsDelivr");
         const p: any = github.parseRepoId(repoWithTag);
         if (!p) throw new Error("ss-guard: cannot parse repo id " + repoWithTag);
-        const tag = p.tag || (github.db && github.db.latestVersionAsync
-            ? await github.db.latestVersionAsync(p.slug, config)
-            : "master");
+        // parseRepoId can return the literal strings "undefined"/"null" as the
+        // tag when an upstream template-stringified an undefined into the URL
+        // (e.g. `${repo.fullName}#${tag}` with tag === undefined). Treat those
+        // as no-tag and resolve via our latestVersionAsync wrap (which honors
+        // releases.v<major>) or fall back to master.
+        const rawTag = p.tag && p.tag !== "undefined" && p.tag !== "null" ? p.tag : undefined;
+        let tag: any = rawTag;
+        if (!tag && github.latestVersionAsync) {
+            try { tag = await github.latestVersionAsync(p.slug, config); } catch { }
+        }
+        if ((!tag || tag === "undefined" || tag === "null") && github.db && github.db.latestVersionAsync) {
+            try { tag = await github.db.latestVersionAsync(p.slug, config); } catch { }
+        }
+        if (!tag || tag === "undefined" || tag === "null") tag = "master";
         return fetchPackageFromJsDelivr(p.fullName, tag);
     };
 }
