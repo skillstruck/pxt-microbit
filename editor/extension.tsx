@@ -42,7 +42,6 @@ pxt.editor.initExtensionsAsync = function (opts: pxt.editor.ExtensionOptions): P
     res.blocklyPatch = patch.patchBlocks;
     res.showProgramTooLargeErrorAsync = dialogs.showProgramTooLargeErrorAsync;
 
-    setupCloudApiRoot();
     setupTutorialFullToolbox(opts.projectView);
     setupGhSearchFallback();
     setupGitHubRepoFallback();
@@ -55,33 +54,6 @@ pxt.editor.initExtensionsAsync = function (opts: pxt.editor.ExtensionOptions): P
     purgePoisonedScriptCacheAsync().catch(e => pxt.debug("purgePoisonedScriptCacheAsync failed: " + e));
 
     return Promise.resolve<pxt.editor.ExtensionResult>(res);
-}
-
-// Skill Struck: pxt-core sets `pxt.Cloud.apiRoot` based on host:
-//
-//   Cloud.apiRoot = isLocalHost() || isNodeJS ? "https://www.makecode.com/api/" : "/api/";
-//
-// Local `pxt serve` hits Microsoft's upstream proxy directly (full coverage of
-// `/api/gh/`, `/api/ghsearch/`, `/api/gh/<repo>/refs/tags`, `/api/gh/<repo>/icon`,
-// etc). Hosted deployments hit `/api/` on their own origin — for us, the
-// Cloudflare Worker on `roboticseditor.test.skillstruck.com/api/` which only
-// covers a subset, hence every workaround in this file.
-//
-// Override `apiRoot` to point at Microsoft's upstream regardless of host. That
-// makes every `/api/...` call match local behavior: real metadata, real tag
-// resolution, real icons. The other wraps below still apply as defense in
-// depth — if makecode.com is ever unreachable or returns empty, they fall
-// back to jsDelivr / synthesis as before. With makecode.com responding
-// normally, those fallbacks are no-ops.
-//
-// The override is idempotent and safe on local: setting apiRoot to the same
-// value it already has is a no-op.
-function setupCloudApiRoot() {
-    const Cloud: any = (pxt as any).Cloud;
-    if (!Cloud) return;
-    if (Cloud._ssApiRootOverridden) return;
-    Cloud._ssApiRootOverridden = true;
-    Cloud.apiRoot = "https://www.makecode.com/api/";
 }
 
 // Skill Struck: tutorial mode normally sets editorState.filters.blocks from
