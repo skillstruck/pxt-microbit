@@ -418,16 +418,27 @@ async function fetchPackageFromJsDelivr(repopath: string, tag: string): Promise<
     if (Array.isArray(parsed.testFiles)) declared.push(...parsed.testFiles);
 
     const files: { [k: string]: string } = { [configName]: configText };
+    const missing: string[] = [];
     await Promise.all(declared.map(async (name) => {
         if (files[name]) return; // already have it (configName, dedupe)
         try {
             const r = await fetch(`${base}/${encodeURI(name)}`);
             if (r.ok) files[name] = await r.text();
-            else pxt.debug(`jsDelivr file ${name} HTTP ${r.status} for ${slug}@${ref}`);
+            else {
+                pxt.debug(`jsDelivr file ${name} HTTP ${r.status} for ${slug}@${ref}`);
+                missing.push(`${name} (HTTP ${r.status})`);
+            }
         } catch (e) {
             pxt.debug(`jsDelivr file ${name} fetch failed for ${slug}@${ref}: ${e}`);
+            missing.push(`${name} (${e})`);
         }
     }));
+    // Fail closed on partial fetches so getPublishedScriptAsync's catch path
+    // skips caching this truncated result. Returning a partial map here would
+    // poison the IndexedDB script cache and re-create the bug this PR fixes.
+    if (missing.length) {
+        throw new Error(`jsDelivr partial fetch for ${slug}@${ref}: missing ${missing.join(", ")}`);
+    }
     return { files };
 }
 
@@ -481,6 +492,12 @@ async function purgePoisonedScriptCacheAsync(): Promise<void> {
         pxt.debug("indexedDB.databases() failed: " + e);
         return;
     }
+    // Scope the purge to databases that look PXT-owned. pxt-core's workspace
+    // DB co-locates "script" with a fixed set of other stores ("texts",
+    // "headers", "github", "hostcache"); a same-origin IndexedDB that happens
+    // to have a "script" store but none of these companions is not ours and
+    // we leave it alone.
+    const PXT_COMPANION_STORES = ["texts", "headers", "github", "hostcache"];
     for (const info of dbInfos) {
         if (!info.name) continue;
         await new Promise<void>((resolve) => {
@@ -488,6 +505,13 @@ async function purgePoisonedScriptCacheAsync(): Promise<void> {
             openReq.onsuccess = () => {
                 const db = openReq.result;
                 if (!db.objectStoreNames.contains("script")) {
+                    db.close();
+                    resolve();
+                    return;
+                }
+                const hasPxtCompanion = PXT_COMPANION_STORES.some(s => db.objectStoreNames.contains(s));
+                if (!hasPxtCompanion) {
+                    pxt.debug(`skipping non-PXT db with 'script' store: ${info.name}`);
                     db.close();
                     resolve();
                     return;
