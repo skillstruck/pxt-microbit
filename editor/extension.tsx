@@ -48,6 +48,9 @@ pxt.editor.initExtensionsAsync = function (opts: pxt.editor.ExtensionOptions): P
     setupGitHubSearchFallback();
     setupGitHubLoadPackageFallback();
     setupGitHubIconFallback();
+    setupGitHubDownloadPackageGuard();
+    // Fire-and-forget; we don't want to block extension init on cache cleanup.
+    purgePoisonedScriptCacheAsync().catch(e => pxt.debug("purgePoisonedScriptCacheAsync failed: " + e));
 
     return Promise.resolve<pxt.editor.ExtensionResult>(res);
 }
@@ -415,15 +418,139 @@ async function fetchPackageFromJsDelivr(repopath: string, tag: string): Promise<
     if (Array.isArray(parsed.testFiles)) declared.push(...parsed.testFiles);
 
     const files: { [k: string]: string } = { [configName]: configText };
+    const missing: string[] = [];
     await Promise.all(declared.map(async (name) => {
         if (files[name]) return; // already have it (configName, dedupe)
         try {
             const r = await fetch(`${base}/${encodeURI(name)}`);
             if (r.ok) files[name] = await r.text();
-            else pxt.debug(`jsDelivr file ${name} HTTP ${r.status} for ${slug}@${ref}`);
+            else {
+                pxt.debug(`jsDelivr file ${name} HTTP ${r.status} for ${slug}@${ref}`);
+                missing.push(`${name} (HTTP ${r.status})`);
+            }
         } catch (e) {
             pxt.debug(`jsDelivr file ${name} fetch failed for ${slug}@${ref}: ${e}`);
+            missing.push(`${name} (${e})`);
         }
     }));
+    // Fail closed on partial fetches so getPublishedScriptAsync's catch path
+    // skips caching this truncated result. Returning a partial map here would
+    // poison the IndexedDB script cache and re-create the bug this PR fixes.
+    if (missing.length) {
+        throw new Error(`jsDelivr partial fetch for ${slug}@${ref}: missing ${missing.join(", ")}`);
+    }
     return { files };
+}
+
+// Skill Struck: pxt.github.downloadPackageAsync's return value flows into
+// getPublishedScriptAsync, which caches `result.files` into IndexedDB
+// (SCRIPT_TABLE) under the upgraded package id. When earlier install
+// attempts hit the broken hosted proxy *before* our fallback shipped,
+// the result was `{ files: undefined }` — and the workspace happily wrote
+// `files: undefined` to IndexedDB. Subsequent install clicks then hit the
+// cache, return undefined files, and crash in setFiles -> Object.keys.
+//
+// Wrap downloadPackageAsync to throw when the underlying loadPackageAsync
+// resolves with an empty/missing files map. A throw skips the cache write
+// in getPublishedScriptAsync's catch block, so future failed downloads
+// stop poisoning the cache. Combined with the IndexedDB purge below,
+// this prevents the bug from recurring and recovers users already stuck
+// from previous failed attempts.
+function setupGitHubDownloadPackageGuard() {
+    const github: any = (pxt as any).github;
+    if (!github || typeof github.downloadPackageAsync !== "function") return;
+    if (github._ssDownloadGuardPatched) return;
+    github._ssDownloadGuardPatched = true;
+    const orig = github.downloadPackageAsync;
+    github.downloadPackageAsync = async function (repoWithTag: string, config: any) {
+        const result = await orig.call(github, repoWithTag, config);
+        if (result && result.files && typeof result.files === "object" && Object.keys(result.files).length > 0) {
+            return result;
+        }
+        // Empty result. Try jsDelivr directly so we still install successfully.
+        pxt.debug("downloadPackageAsync empty for " + repoWithTag + ", refetching via jsDelivr");
+        const p: any = github.parseRepoId(repoWithTag);
+        if (!p) throw new Error("ss-guard: cannot parse repo id " + repoWithTag);
+        const tag = p.tag || (github.db && github.db.latestVersionAsync
+            ? await github.db.latestVersionAsync(p.slug, config)
+            : "master");
+        return fetchPackageFromJsDelivr(p.fullName, tag);
+    };
+}
+
+// Skill Struck: scan IndexedDB on init and delete script-cache entries
+// whose `files` is missing or empty. Such entries are leftover poison from
+// installs that ran against the broken proxy before the fallback shipped.
+// One-time cleanup per page load; on subsequent loads the cache is clean
+// and we're a no-op.
+async function purgePoisonedScriptCacheAsync(): Promise<void> {
+    if (typeof indexedDB === "undefined" || !(indexedDB as any).databases) return;
+    let dbInfos: { name?: string }[];
+    try {
+        dbInfos = await (indexedDB as any).databases();
+    } catch (e) {
+        pxt.debug("indexedDB.databases() failed: " + e);
+        return;
+    }
+    // Scope the purge to databases that look PXT-owned. pxt-core's workspace
+    // DB co-locates "script" with a fixed set of other stores ("texts",
+    // "headers", "github", "hostcache"); a same-origin IndexedDB that happens
+    // to have a "script" store but none of these companions is not ours and
+    // we leave it alone.
+    const PXT_COMPANION_STORES = ["texts", "headers", "github", "hostcache"];
+    for (const info of dbInfos) {
+        if (!info.name) continue;
+        await new Promise<void>((resolve) => {
+            const openReq = indexedDB.open(info.name!);
+            openReq.onsuccess = () => {
+                const db = openReq.result;
+                if (!db.objectStoreNames.contains("script")) {
+                    db.close();
+                    resolve();
+                    return;
+                }
+                const hasPxtCompanion = PXT_COMPANION_STORES.some(s => db.objectStoreNames.contains(s));
+                if (!hasPxtCompanion) {
+                    pxt.debug(`skipping non-PXT db with 'script' store: ${info.name}`);
+                    db.close();
+                    resolve();
+                    return;
+                }
+                let tx: IDBTransaction;
+                try {
+                    tx = db.transaction("script", "readwrite");
+                } catch (e) {
+                    db.close();
+                    resolve();
+                    return;
+                }
+                const store = tx.objectStore("script");
+                const cursorReq = store.openCursor();
+                let purged = 0;
+                cursorReq.onsuccess = () => {
+                    const cursor = cursorReq.result;
+                    if (cursor) {
+                        const value = cursor.value;
+                        const files = value && value.files;
+                        const isEmpty = !files
+                            || typeof files !== "object"
+                            || Object.keys(files).length === 0;
+                        if (isEmpty) {
+                            cursor.delete();
+                            purged++;
+                        }
+                        cursor.continue();
+                    } else {
+                        if (purged > 0) pxt.debug(`purged ${purged} poisoned script-cache entries from ${info.name}`);
+                        db.close();
+                        resolve();
+                    }
+                };
+                cursorReq.onerror = () => { db.close(); resolve(); };
+                tx.onerror = () => { try { db.close(); } catch { } resolve(); };
+            };
+            openReq.onerror = () => resolve();
+            openReq.onblocked = () => resolve();
+        });
+    }
 }
