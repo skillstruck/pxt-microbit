@@ -641,7 +641,8 @@ function setupCustomConflictDetection() {
                 if (String(depPkg.id).toLowerCase() === String(newPkgName).toLowerCase()) continue;
                 if (!group.some(g => g.toLowerCase() === String(depPkg.id).toLowerCase())) continue;
                 // Don't double-report if the original already detected this same pkg.
-                if (conflicts.some(c => c && c.pkg0 && c.pkg0.id === depPkg.id)) continue;
+                if (conflicts.some(c => c && c.pkg0 && c.pkg0.id
+                    && String(c.pkg0.id).toLowerCase() === String(depPkg.id).toLowerCase())) continue;
                 const conflict: any = new PkgConflictErrorCtor(
                     `Extension ${depPkg.id} is mutually exclusive with ${newPkgName}`
                 );
