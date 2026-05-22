@@ -1,6 +1,14 @@
 {
     "packages": {
+        "releases": {
+            "v7": [
+                "DFRobot/pxt-maqueen#v1.7.16"
+            ]
+        },
         "approvedRepoLib": {
+            "elecfreaks/pxt-neopixel": {},
+            "dfrobot/pxt-dfrobot_newir": {},
+            "tangjie133/pxt-DFRobot_IR": {},
             "microsoft/pxt-neopixel": {
                 "tags": [ "Lights and Display" ],
                 "preferred": true
