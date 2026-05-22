@@ -50,6 +50,7 @@ pxt.editor.initExtensionsAsync = function (opts: pxt.editor.ExtensionOptions): P
     setupGitHubLoadPackageFallback();
     setupGitHubIconFallback();
     setupGitHubDownloadPackageGuard();
+    setupCustomConflictDetection();
     // Fire-and-forget; we don't want to block extension init on cache cleanup.
     purgePoisonedScriptCacheAsync().catch(e => pxt.debug("purgePoisonedScriptCacheAsync failed: " + e));
 
@@ -575,6 +576,83 @@ function setupGitHubDownloadPackageGuard() {
         }
         if (!tag || tag === "undefined" || tag === "null") tag = "master";
         return fetchPackageFromJsDelivr(p.fullName, tag);
+    };
+}
+
+// Skill Struck: pxt.Package.prototype.findConflictsAsync only catches three
+// classes of conflict (core duplicates, yotta config overlap, same-name
+// version mismatch). It does NOT detect symbol-level overlap — two packages
+// that declare overlapping namespaces, duplicate filenames, or functions
+// with the same name compile-error with "function already defined" but pass
+// through findConflictsAsync because their package names differ and they
+// have no yotta-config collisions.
+//
+// elecfreaks/pxt-cutebot (name "cutebot") and elecfreaks/pxt-cutebot-pro
+// (name "pxt-cutebotpro") both ship IR.cpp / shims.d.ts / enums.d.ts and
+// share namespace declarations, so installing both produces a broken
+// project. Local makecode.com upstream has the same limitation — this
+// isn't a hosted-vs-local divergence, it's a pxt-core gap that affects
+// every kit fork built atop the same base.
+//
+// Wrap findConflictsAsync to inject synthetic PkgConflictError entries when
+// a package about to be installed is in the same mutual-exclusion group
+// as an already-installed extension. The popup logic in
+// addDependencyAsync's call site uses `conflict.pkg0.id` for the
+// "Remove {pkg0.id} and add {newPkg.name}" dialog text and to drive the
+// subsequent removeDepAsync call, so the synthetic conflicts integrate
+// transparently with the existing UI.
+function setupCustomConflictDetection() {
+    const Package: any = (pxt as any).Package;
+    if (!Package || !Package.prototype || typeof Package.prototype.findConflictsAsync !== "function") return;
+    if (Package.prototype._ssCustomConflictPatched) return;
+    Package.prototype._ssCustomConflictPatched = true;
+
+    // Each inner array is a group of package names that are mutually
+    // exclusive — installing any one of them precludes installing any
+    // other. Names match the `name` field of each package's pxt.json
+    // (case-insensitive). Add more groups here as new pairs surface.
+    const MUTUALLY_EXCLUSIVE_GROUPS: string[][] = [
+        ["cutebot", "pxt-cutebotpro"],
+    ];
+
+    const findGroup = (pkgName: string): string[] | undefined => {
+        const needle = String(pkgName).toLowerCase();
+        for (const group of MUTUALLY_EXCLUSIVE_GROUPS) {
+            if (group.some(g => g.toLowerCase() === needle)) return group;
+        }
+        return undefined;
+    };
+
+    const orig = Package.prototype.findConflictsAsync;
+    Package.prototype.findConflictsAsync = async function (pkgOrId: any, version: any) {
+        const conflicts: any[] = await orig.call(this, pkgOrId, version) || [];
+        try {
+            const newPkgName: string | undefined = typeof pkgOrId === "string"
+                ? pkgOrId
+                : (pkgOrId && pkgOrId.name);
+            if (!newPkgName) return conflicts;
+            const group = findGroup(newPkgName);
+            if (!group) return conflicts;
+            const installedDeps = this.parent && typeof this.parent.sortedDeps === "function"
+                ? this.parent.sortedDeps() : [];
+            const PkgConflictErrorCtor = ((pxt as any).cpp && (pxt as any).cpp.PkgConflictError) || Error;
+            for (const depPkg of installedDeps) {
+                if (!depPkg || !depPkg.id) continue;
+                if (String(depPkg.id).toLowerCase() === String(newPkgName).toLowerCase()) continue;
+                if (!group.some(g => g.toLowerCase() === String(depPkg.id).toLowerCase())) continue;
+                // Don't double-report if the original already detected this same pkg.
+                if (conflicts.some(c => c && c.pkg0 && c.pkg0.id
+                    && String(c.pkg0.id).toLowerCase() === String(depPkg.id).toLowerCase())) continue;
+                const conflict: any = new PkgConflictErrorCtor(
+                    `Extension ${depPkg.id} is mutually exclusive with ${newPkgName}`
+                );
+                conflict.pkg0 = depPkg;
+                conflicts.push(conflict);
+            }
+        } catch (e) {
+            pxt.debug("custom conflict check failed: " + e);
+        }
+        return conflicts;
     };
 }
 

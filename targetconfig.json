@@ -6,6 +6,9 @@
             ]
         },
         "approvedRepoLib": {
+            "elecfreaks/pxt-neopixel": {},
+            "dfrobot/pxt-dfrobot_newir": {},
+            "tangjie133/pxt-DFRobot_IR": {},
             "microsoft/pxt-neopixel": {
                 "tags": [ "Lights and Display" ],
                 "preferred": true
