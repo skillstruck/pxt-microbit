@@ -1,0 +1,102 @@
+# A custom .semgrepignore replaces Semgrep's bundled defaults, so the common
+# default patterns are reproduced here, followed by project-specific entries.
+
+# --- Common defaults ---
+# Git
+.git/
+
+# Dependencies
+node_modules/
+jspm_packages/
+bower_components/
+vendor/
+# PXT / yotta / native dependency dirs
+pxt_modules/
+yotta_modules/
+yotta_targets/
+typings/
+
+# Logs
+*.log
+logs/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+.cursor/
+
+# --- Build / generated output (PXT / MakeCode) ---
+built/
+build/
+dist/
+tmp/
+temp/
+hexcache/
+electron-out/
+.pxt/
+.cache/
+# Windows client build artifacts
+clients/**/bin/
+clients/**/obj/
+clients/win10/app/AppPackages/
+clients/win10/app/BundlePackages/
+clients/win10/app/BundleArtifacts/
+
+# Minified / bundled assets (false-positive heavy, not source)
+*.min.js
+*.min.css
+*.bundle.js
+
+# --- Test files / mocks (excluded to reduce noise; not shipped code) ---
+tests/
+test/
+__mocks__/
+*.test.js
+*.test.ts
+*.spec.js
+*.spec.ts
+
+# --- Third-party / vendored ---
+external/
+
+# --- User projects (generated/sample content) ---
+projects/
+
+# --- Docs & static doc assets (not code) ---
+docs/
+docfiles/
+*.md
+
+# --- Lockfiles / dependency metadata (data, not code) ---
+package-lock.json
+yarn.lock
+
+# --- Coverage / instrumentation ---
+coverage/
+.nyc_output/
+lib-cov/
+
+# --- Non-code assets ---
+resources/
+*.svg
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.ico
+*.wav
+*.mp3
+*.ogg
+*.pdf
+*.ttf
+*.otf
+*.woff
+*.woff2
+
+# --- Secrets / local config (not scanned as source) ---
+.env
+*.env
+
+# --- Semgrep's own output ---
+semgrep-security-report.txt
