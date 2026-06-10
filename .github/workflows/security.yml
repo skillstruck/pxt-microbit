@@ -4,6 +4,8 @@ on:
   pull_request:
     branches:
       - dev
+      - feat/**
+      - main
       - master
   workflow_dispatch:
 
