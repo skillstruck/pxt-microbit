@@ -8,7 +8,7 @@
         "approvedRepoLib": {
             "elecfreaks/pxt-neopixel": {},
             "dfrobot/pxt-dfrobot_newir": {},
-            "tangjie133/pxt-DFRobot_IR": {},
+            "tangjie133/pxt-dfrobot_ir": {},
             "microsoft/pxt-neopixel": {
                 "tags": [ "Lights and Display" ],
                 "preferred": true
