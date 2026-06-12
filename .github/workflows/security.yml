@@ -13,7 +13,74 @@ permissions:
   contents: read
   pull-requests: write
 
+# Since pxt-microbit is a public fork of pxt-core, we need to use a custom Semgrep config instead of the reusable one.
 jobs:
-  scan:
-    name: Scan
-    uses: skillstruck/workflows/.github/workflows/security-scan.yml@master
+  semgrep:
+    name: Semgrep
+    permissions:
+      contents: read
+      pull-requests: write  # needed to comment on PRs with findings
+    runs-on: ubuntu-latest
+    env:
+      SEMGREP_VERSION: '1.164.0'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.14'
+
+      - name: Cache Semgrep install
+        id: cache-semgrep
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: .semgrep-venv
+          key: semgrep-${{ runner.os }}-py3.14-${{ env.SEMGREP_VERSION }}
+
+      - name: Install Semgrep
+        if: steps.cache-semgrep.outputs.cache-hit != 'true'
+        run: |
+          python -m venv .semgrep-venv
+          .semgrep-venv/bin/pip install semgrep==${{ env.SEMGREP_VERSION }}
+
+      - name: Run Semgrep
+        id: semgrep
+        run: |
+          set +e
+          .semgrep-venv/bin/semgrep scan \
+            --config p/owasp-top-ten \
+            --config p/r2c-security-audit \
+            --config p/xss \
+            --config p/sql-injection \
+            --config p/javascript \
+            --config p/typescript \
+            --severity ERROR \
+            --metrics=off \
+            --error \
+            --text \
+            --text-output=semgrep-security-report.txt
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          set -e
+
+      - name: Post report as PR comment
+        if: always() && github.event_name == 'pull_request' && steps.semgrep.outputs.exit_code != '0'
+        uses: actions/github-script@d746ffe35508b1917358783b479e04febd2b8f71  # v9.0.0
+        with:
+          script: |
+            const fs = require('fs');
+            const reportPath = 'semgrep-security-report.txt';
+
+            const contents = fs.readFileSync(reportPath, 'utf8').trim();
+
+            const body = '### Semgrep security scan\n\n```\n' + contents + '\n```';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+      - name: Fail job if Semgrep found issues
+        if: steps.semgrep.outputs.exit_code != '0'
+        run: exit 1
