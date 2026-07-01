@@ -730,6 +730,45 @@ function setupPythonPasteIndentFix(projectView: pxt.editor.IProjectView) {
             pxt.debug("paste-fix enforce failed: " + e);
         }
     };
+    // Disabling the paste-reindenters (above) makes paste verbatim, which is
+    // right when the block is pasted at its original indent but wrong across a
+    // deeper level: the copy dropped the first line's leading whitespace, so the
+    // statement lands at the cursor indent while the `"""` string rows paste at
+    // their old indent — leaving e.g. `basic.show_leds` at 8 and its LED rows at
+    // 4. We can't recover the intended offset from the clipboard, so after a
+    // Python paste we realign each triple-quoted string's content (and its
+    // closing `"""`) to its statement's indent. A `"""`-parity state machine
+    // finds the string spans; non-string code lines are never touched, so real
+    // multi-line code keeps its structure.
+    const leadingOf = (s: string): string => (s.match(/^[ \t]*/) || [""])[0];
+    const tripleQuotes = (s: string): number => s.split('"""').length - 1;
+    const alignPastedStrings = (ed: any, range: any) => {
+        try {
+            if (languageOf(ed) !== "python") return;
+            const model = typeof ed.getModel === "function" ? ed.getModel() : null;
+            const R = win.monaco && win.monaco.Range;
+            if (!model || !range || !R || range.endLineNumber <= range.startLineNumber) return;
+            const edits: any[] = [];
+            let insideStr = false;
+            let stmtIndent = "";
+            for (let ln = range.startLineNumber; ln <= range.endLineNumber; ln++) {
+                const text = model.getLineContent(ln);
+                if (!insideStr) {
+                    stmtIndent = leadingOf(text); // a code line sets the current statement indent
+                    if (tripleQuotes(text) % 2 === 1) insideStr = true;
+                } else {
+                    const curWS = leadingOf(text);
+                    if (curWS !== stmtIndent && text.trim().length > 0) {
+                        edits.push({ range: new R(ln, 1, ln, curWS.length + 1), text: stmtIndent });
+                    }
+                    if (tripleQuotes(text) % 2 === 1) insideStr = false; // this line closes it
+                }
+            }
+            if (edits.length) ed.executeEdits("ss-paste-align", edits);
+        } catch (e) {
+            pxt.debug("paste-fix alignPastedStrings failed: " + e);
+        }
+    };
     const hookEditor = (ed: any) => {
         try {
             if (!isMonacoEditor(ed) || ed._ssPasteHooked) return;
@@ -739,6 +778,9 @@ function setupPythonPasteIndentFix(projectView: pxt.editor.IProjectView) {
             if (typeof ed.onDidChangeModel === "function") ed.onDidChangeModel(() => enforce(ed));
             if (typeof ed.onDidChangeModelLanguage === "function") ed.onDidChangeModelLanguage(() => enforce(ed));
             ed.onDidChangeConfiguration(() => enforce(ed)); // re-enforce on any option reset
+            if (typeof ed.onDidPaste === "function") {
+                ed.onDidPaste((e: any) => alignPastedStrings(ed, e && (e.range || e)));
+            }
         } catch (e) {
             pxt.debug("paste-fix hookEditor failed: " + e);
         }
