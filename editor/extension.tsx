@@ -721,18 +721,28 @@ function setupPythonPasteIndentFix(projectView: pxt.editor.IProjectView) {
             const isPy = languageOf(ed) === "python";
             const aiIdx = optIndex("autoIndent", EOPT_AUTO_INDENT_FALLBACK);
             const fopIdx = optIndex("formatOnPaste", EOPT_FORMAT_ON_PASTE_FALLBACK);
-            // For Python, force advanced/false. For any other language, restore
-            // the editor's own baseline (captured in hookEditor before we first
-            // touched it) rather than hard-coding pxt defaults — so we never
-            // clobber a target/user setting on non-Python editors.
-            const wantAI = isPy ? 3 /*advanced*/ : ed._ssBaseAI;
-            const wantFOP = isPy ? false : ed._ssBaseFOP;
-            if (wantAI == null || wantFOP == null) return; // no baseline yet
             let curAI: any, curFOP: any;
-            try { curAI = ed.getOption(aiIdx); curFOP = ed.getOption(fopIdx); } catch (e) { /* older api */ }
-            if (curAI !== wantAI || curFOP !== wantFOP) {
-                const aiName = isPy ? "advanced" : (AUTO_INDENT_NAMES[wantAI] || "full");
-                ed.updateOptions({ autoIndent: aiName, formatOnPaste: wantFOP });
+            try { curAI = ed.getOption(aiIdx); curFOP = ed.getOption(fopIdx); } catch (e) { return; /* older api */ }
+            if (isPy) {
+                // Force advanced/false; re-apply if drifted (defeats clobbering).
+                if (curAI !== 3 || curFOP !== false) {
+                    ed.updateOptions({ autoIndent: "advanced", formatOnPaste: false });
+                }
+                ed._ssForcedPy = true;
+            } else if (ed._ssForcedPy) {
+                // Leaving Python: restore the pre-force baseline exactly once, so
+                // we don't strand the editor on our Python settings.
+                ed._ssForcedPy = false;
+                const baseAI = ed._ssBaseAI, baseFOP = ed._ssBaseFOP;
+                if (baseAI != null && baseFOP != null && (curAI !== baseAI || curFOP !== baseFOP)) {
+                    ed.updateOptions({ autoIndent: AUTO_INDENT_NAMES[baseAI] || "full", formatOnPaste: baseFOP });
+                }
+            } else {
+                // Non-Python editor we never forced: leave its options untouched,
+                // but keep the baseline current so any later target/user change is
+                // preserved (not reverted) and honored if it later becomes Python.
+                ed._ssBaseAI = curAI;
+                ed._ssBaseFOP = curFOP;
             }
         } catch (e) {
             pxt.debug("paste-fix enforce failed: " + e);
@@ -744,8 +754,12 @@ function setupPythonPasteIndentFix(projectView: pxt.editor.IProjectView) {
     // statement lands at the cursor indent while the `"""` string rows paste at
     // their old indent — leaving e.g. `basic.show_leds` at 8 and its LED rows at
     // 4. We can't recover the intended offset from the clipboard, so after a
-    // Python paste we realign each triple-quoted string's content (and its
-    // closing `"""`) to its statement's indent.
+    // Python paste we shift each triple-quoted string block so its first row
+    // aligns with the owning statement's indent. The shift is a single uniform
+    // delta applied to every row of that block, so any meaningful relative
+    // indentation WITHIN the string is preserved (only the block's baseline
+    // moves). For LED art, where all rows share one indent, they all land on the
+    // statement indent as intended.
     //
     // We classify each pasted line via the model's tokenizer rather than by
     // counting `"""` substrings: a line is "string content" iff its first
@@ -775,21 +789,34 @@ function setupPythonPasteIndentFix(projectView: pxt.editor.IProjectView) {
             const R = win.monaco && win.monaco.Range;
             if (!model || !range || !R || range.endLineNumber <= range.startLineNumber) return;
             const edits: any[] = [];
-            let stmtIndent = "";
+            let stmtLen = 0;       // indent (in chars) of the current statement
             let sawCode = false;
+            let inBlock = false;   // inside a triple-quoted string block
+            let blockDelta = 0;    // uniform shift for the current block's rows
             for (let ln = range.startLineNumber; ln <= range.endLineNumber; ln++) {
                 const text = model.getLineContent(ln);
                 if (isStringContentLine(model, ln)) {
                     if (!sawCode) continue; // no anchoring statement seen yet
-                    const curWS = leadingOf(text);
-                    if (curWS !== stmtIndent && text.trim().length > 0) {
-                        edits.push({ range: new R(ln, 1, ln, curWS.length + 1), text: stmtIndent });
+                    const curLen = leadingOf(text).length;
+                    if (!inBlock) {
+                        // First row of this string block anchors the shift: align
+                        // it to the statement, then move every other row by the
+                        // same delta (preserving the string's internal structure).
+                        inBlock = true;
+                        blockDelta = stmtLen - curLen;
+                    }
+                    if (blockDelta !== 0 && text.trim().length > 0) {
+                        const newLen = Math.max(0, curLen + blockDelta);
+                        if (newLen !== curLen) {
+                            edits.push({ range: new R(ln, 1, ln, curLen + 1), text: " ".repeat(newLen) });
+                        }
                     }
                 } else if (text.trim().length > 0) {
-                    stmtIndent = leadingOf(text); // code line sets the current statement indent
+                    stmtLen = leadingOf(text).length; // code line sets the statement indent
                     sawCode = true;
+                    inBlock = false; // a code line ends any open string block
                 }
-                // blank lines: leave untouched, don't disturb stmtIndent
+                // blank lines: leave untouched, don't disturb statement/block state
             }
             if (edits.length) ed.executeEdits("ss-paste-align", edits);
         } catch (e) {
