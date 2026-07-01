@@ -51,6 +51,7 @@ pxt.editor.initExtensionsAsync = function (opts: pxt.editor.ExtensionOptions): P
     setupGitHubIconFallback();
     setupGitHubDownloadPackageGuard();
     setupCustomConflictDetection();
+    setupPythonPasteIndentFix(opts.projectView);
     // Fire-and-forget; we don't want to block extension init on cache cleanup.
     purgePoisonedScriptCacheAsync().catch(e => pxt.debug("purgePoisonedScriptCacheAsync failed: " + e));
 
@@ -654,6 +655,105 @@ function setupCustomConflictDetection() {
         }
         return conflicts;
     };
+}
+
+// Skill Struck (sc-30921): pasting an indented block inside a forever body —
+// e.g. a `basic.show_leds("""..."""` flipbook image — shifted the string lines
+// right, compounding on repeat. Monaco has two paste-reindent paths and pxt's
+// defaults (autoIndent "full", formatOnPaste true) always hit one: the Python
+// range formatter (via formatOnPaste) or the `autoIndentOnPaste` contribution
+// (active only when autoIndent === Full(4) && !formatOnPaste). Neither treats
+// `"""` string content as verbatim. Fix: for Python only, set formatOnPaste
+// false AND autoIndent "advanced"(3) — 3 is below the Full(4) paste-reindent
+// threshold but still >= 3, so the indent-after-`:` onEnterRules keep working
+// (Full vs Advanced is otherwise a no-op for Python; it has no indentationRules).
+// Other languages keep pxt's defaults.
+//
+// Reaching the editor: onDidCreateEditor subscribes too late (monaco loads as
+// the editor is created) and this build has no getEditors(). The reliable handle
+// is pxt's projectView.textEditor.editor (the raw monaco editor), which we poll
+// (idempotent via _ssPasteHooked) like setupTutorialFullToolbox above. enforce()
+// re-applies on every config change (loop-safe: reads getOption, writes only on
+// mismatch), which also undoes any later clobbering back to Full.
+//
+// Resolved EditorOption indices in this build: autoIndent = 9, formatOnPaste = 44.
+const EOPT_AUTO_INDENT = 9;
+const EOPT_FORMAT_ON_PASTE = 44;
+
+function setupPythonPasteIndentFix(projectView: pxt.editor.IProjectView) {
+    const win = window as any;
+    if (win._ssPastePatchInstalled) return;
+    win._ssPastePatchInstalled = true;
+
+    const languageOf = (ed: any): string => {
+        try {
+            const model = ed && typeof ed.getModel === "function" ? ed.getModel() : null;
+            if (!model) return "";
+            // This monaco build exposes getModeId, not getLanguageId, on models.
+            if (typeof model.getLanguageId === "function") return model.getLanguageId();
+            if (typeof model.getModeId === "function") return model.getModeId();
+        } catch (e) {
+            pxt.debug("paste-fix languageOf failed: " + e);
+        }
+        return "";
+    };
+    const isMonacoEditor = (ed: any): boolean =>
+        !!ed && typeof ed.updateOptions === "function" && typeof ed.getOption === "function"
+        && typeof ed.getModel === "function" && typeof ed.onDidChangeConfiguration === "function";
+    const enforce = (ed: any) => {
+        try {
+            const isPy = languageOf(ed) === "python";
+            const wantAI = isPy ? 3 /*advanced*/ : 4 /*full*/;
+            const wantFOP = isPy ? false : true;
+            let curAI: any, curFOP: any;
+            try { curAI = ed.getOption(EOPT_AUTO_INDENT); curFOP = ed.getOption(EOPT_FORMAT_ON_PASTE); } catch (e) { /* older api */ }
+            if (curAI !== wantAI || curFOP !== wantFOP) {
+                ed.updateOptions({ autoIndent: isPy ? "advanced" : "full", formatOnPaste: wantFOP });
+            }
+        } catch (e) {
+            pxt.debug("paste-fix enforce failed: " + e);
+        }
+    };
+    const hookEditor = (ed: any) => {
+        try {
+            if (!isMonacoEditor(ed) || ed._ssPasteHooked) return;
+            ed._ssPasteHooked = true;
+            enforce(ed);
+            setTimeout(() => enforce(ed), 0); // model may attach a tick later
+            if (typeof ed.onDidChangeModel === "function") ed.onDidChangeModel(() => enforce(ed));
+            if (typeof ed.onDidChangeModelLanguage === "function") ed.onDidChangeModelLanguage(() => enforce(ed));
+            ed.onDidChangeConfiguration(() => enforce(ed)); // re-enforce on any option reset
+        } catch (e) {
+            pxt.debug("paste-fix hookEditor failed: " + e);
+        }
+    };
+
+    // Primary path: pxt's text editor. Poll because it's created lazily and can
+    // be recreated; hookEditor is a no-op once a given instance is hooked.
+    const pv: any = projectView;
+    if (pv) {
+        setInterval(() => {
+            try {
+                const te = pv.textEditor;
+                if (te && te.editor) hookEditor(te.editor);
+            } catch (e) {
+                pxt.debug("paste-fix projectView poll failed: " + e);
+            }
+        }, 500);
+    }
+
+    // Best-effort secondary path: future editors via onDidCreateEditor.
+    let attempts = 0;
+    const trySubscribe = () => {
+        const monaco = win.monaco;
+        if (monaco && monaco.editor && typeof monaco.editor.onDidCreateEditor === "function") {
+            try { monaco.editor.onDidCreateEditor((ed: any) => hookEditor(ed)); } catch (e) { }
+            return;
+        }
+        if (++attempts > 400) return; // ~100s @ 250ms
+        setTimeout(trySubscribe, 250);
+    };
+    trySubscribe();
 }
 
 // Skill Struck: scan IndexedDB on init and delete script-cache entries
