@@ -713,18 +713,26 @@ function setupPythonPasteIndentFix(projectView: pxt.editor.IProjectView) {
     const isMonacoEditor = (ed: any): boolean =>
         !!ed && typeof ed.updateOptions === "function" && typeof ed.getOption === "function"
         && typeof ed.getModel === "function" && typeof ed.onDidChangeConfiguration === "function";
+    // autoIndent must be written to updateOptions as its string name, but
+    // getOption returns the numeric ordinal — map back for the restore path.
+    const AUTO_INDENT_NAMES = ["none", "keep", "brackets", "advanced", "full"];
     const enforce = (ed: any) => {
         try {
             const isPy = languageOf(ed) === "python";
-            const wantAI = isPy ? 3 /*advanced*/ : 4 /*full*/;
-            const wantFOP = isPy ? false : true;
+            const aiIdx = optIndex("autoIndent", EOPT_AUTO_INDENT_FALLBACK);
+            const fopIdx = optIndex("formatOnPaste", EOPT_FORMAT_ON_PASTE_FALLBACK);
+            // For Python, force advanced/false. For any other language, restore
+            // the editor's own baseline (captured in hookEditor before we first
+            // touched it) rather than hard-coding pxt defaults — so we never
+            // clobber a target/user setting on non-Python editors.
+            const wantAI = isPy ? 3 /*advanced*/ : ed._ssBaseAI;
+            const wantFOP = isPy ? false : ed._ssBaseFOP;
+            if (wantAI == null || wantFOP == null) return; // no baseline yet
             let curAI: any, curFOP: any;
-            try {
-                curAI = ed.getOption(optIndex("autoIndent", EOPT_AUTO_INDENT_FALLBACK));
-                curFOP = ed.getOption(optIndex("formatOnPaste", EOPT_FORMAT_ON_PASTE_FALLBACK));
-            } catch (e) { /* older api */ }
+            try { curAI = ed.getOption(aiIdx); curFOP = ed.getOption(fopIdx); } catch (e) { /* older api */ }
             if (curAI !== wantAI || curFOP !== wantFOP) {
-                ed.updateOptions({ autoIndent: isPy ? "advanced" : "full", formatOnPaste: wantFOP });
+                const aiName = isPy ? "advanced" : (AUTO_INDENT_NAMES[wantAI] || "full");
+                ed.updateOptions({ autoIndent: aiName, formatOnPaste: wantFOP });
             }
         } catch (e) {
             pxt.debug("paste-fix enforce failed: " + e);
@@ -737,11 +745,29 @@ function setupPythonPasteIndentFix(projectView: pxt.editor.IProjectView) {
     // their old indent — leaving e.g. `basic.show_leds` at 8 and its LED rows at
     // 4. We can't recover the intended offset from the clipboard, so after a
     // Python paste we realign each triple-quoted string's content (and its
-    // closing `"""`) to its statement's indent. A `"""`-parity state machine
-    // finds the string spans; non-string code lines are never touched, so real
-    // multi-line code keeps its structure.
+    // closing `"""`) to its statement's indent.
+    //
+    // We classify each pasted line via the model's tokenizer rather than by
+    // counting `"""` substrings: a line is "string content" iff its first
+    // non-whitespace token is a String token. That skips comments (`# """`) and
+    // ordinary strings that merely contain `"""`, which a naive `"""`-parity
+    // scan would mis-handle. Non-string code lines set the current statement
+    // indent and are never modified, so real multi-line code keeps its shape.
     const leadingOf = (s: string): string => (s.match(/^[ \t]*/) || [""])[0];
-    const tripleQuotes = (s: string): number => s.split('"""').length - 1;
+    const STANDARD_TOKEN_STRING = 2; // monaco StandardTokenType: Other0 Comment1 String2 RegEx3
+    const isStringContentLine = (model: any, ln: number): boolean => {
+        try {
+            if (typeof model.forceTokenization === "function") model.forceTokenization(ln);
+            const col = model.getLineFirstNonWhitespaceColumn(ln); // 1-based; 0 if blank/all-ws
+            if (!col) return false;
+            const tokens = model.getLineTokens(ln);
+            if (!tokens || typeof tokens.getCount !== "function" || tokens.getCount() === 0) return false;
+            const idx = tokens.findTokenIndexAtOffset(col - 1);
+            return idx >= 0 && tokens.getStandardTokenType(idx) === STANDARD_TOKEN_STRING;
+        } catch (e) {
+            return false;
+        }
+    };
     const alignPastedStrings = (ed: any, range: any) => {
         try {
             if (languageOf(ed) !== "python") return;
@@ -749,20 +775,21 @@ function setupPythonPasteIndentFix(projectView: pxt.editor.IProjectView) {
             const R = win.monaco && win.monaco.Range;
             if (!model || !range || !R || range.endLineNumber <= range.startLineNumber) return;
             const edits: any[] = [];
-            let insideStr = false;
             let stmtIndent = "";
+            let sawCode = false;
             for (let ln = range.startLineNumber; ln <= range.endLineNumber; ln++) {
                 const text = model.getLineContent(ln);
-                if (!insideStr) {
-                    stmtIndent = leadingOf(text); // a code line sets the current statement indent
-                    if (tripleQuotes(text) % 2 === 1) insideStr = true;
-                } else {
+                if (isStringContentLine(model, ln)) {
+                    if (!sawCode) continue; // no anchoring statement seen yet
                     const curWS = leadingOf(text);
                     if (curWS !== stmtIndent && text.trim().length > 0) {
                         edits.push({ range: new R(ln, 1, ln, curWS.length + 1), text: stmtIndent });
                     }
-                    if (tripleQuotes(text) % 2 === 1) insideStr = false; // this line closes it
+                } else if (text.trim().length > 0) {
+                    stmtIndent = leadingOf(text); // code line sets the current statement indent
+                    sawCode = true;
                 }
+                // blank lines: leave untouched, don't disturb stmtIndent
             }
             if (edits.length) ed.executeEdits("ss-paste-align", edits);
         } catch (e) {
@@ -773,6 +800,12 @@ function setupPythonPasteIndentFix(projectView: pxt.editor.IProjectView) {
         try {
             if (!isMonacoEditor(ed) || ed._ssPasteHooked) return;
             ed._ssPasteHooked = true;
+            // Capture the editor's own option baseline BEFORE we change anything,
+            // so enforce() can restore it verbatim for non-Python languages.
+            try {
+                ed._ssBaseAI = ed.getOption(optIndex("autoIndent", EOPT_AUTO_INDENT_FALLBACK));
+                ed._ssBaseFOP = ed.getOption(optIndex("formatOnPaste", EOPT_FORMAT_ON_PASTE_FALLBACK));
+            } catch (e) { /* older api — enforce will no-op until baseline exists */ }
             enforce(ed);
             setTimeout(() => enforce(ed), 0); // model may attach a tick later
             if (typeof ed.onDidChangeModel === "function") ed.onDidChangeModel(() => enforce(ed));
