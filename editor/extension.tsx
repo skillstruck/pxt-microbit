@@ -676,14 +676,27 @@ function setupCustomConflictDetection() {
 // re-applies on every config change (loop-safe: reads getOption, writes only on
 // mismatch), which also undoes any later clobbering back to Full.
 //
-// Resolved EditorOption indices in this build: autoIndent = 9, formatOnPaste = 44.
-const EOPT_AUTO_INDENT = 9;
-const EOPT_FORMAT_ON_PASTE = 44;
+// getOption() takes a numeric EditorOption ordinal, which is not stable across
+// monaco versions — so we resolve it from the named monaco.editor.EditorOption.*
+// constant at runtime, falling back to this build's known values only if the
+// enum isn't exposed. (autoIndent = 9, formatOnPaste = 44 in pxt-core 11.4.4.)
+const EOPT_AUTO_INDENT_FALLBACK = 9;
+const EOPT_FORMAT_ON_PASTE_FALLBACK = 44;
 
 function setupPythonPasteIndentFix(projectView: pxt.editor.IProjectView) {
     const win = window as any;
     if (win._ssPastePatchInstalled) return;
     win._ssPastePatchInstalled = true;
+
+    // Resolve an EditorOption ordinal from its named constant, once monaco is up.
+    const optIndex = (name: string, fallback: number): number => {
+        try {
+            const eo = win.monaco && win.monaco.editor && win.monaco.editor.EditorOption;
+            const v = eo && eo[name];
+            if (typeof v === "number") return v;
+        } catch (e) { /* fall through */ }
+        return fallback;
+    };
 
     const languageOf = (ed: any): string => {
         try {
@@ -706,7 +719,10 @@ function setupPythonPasteIndentFix(projectView: pxt.editor.IProjectView) {
             const wantAI = isPy ? 3 /*advanced*/ : 4 /*full*/;
             const wantFOP = isPy ? false : true;
             let curAI: any, curFOP: any;
-            try { curAI = ed.getOption(EOPT_AUTO_INDENT); curFOP = ed.getOption(EOPT_FORMAT_ON_PASTE); } catch (e) { /* older api */ }
+            try {
+                curAI = ed.getOption(optIndex("autoIndent", EOPT_AUTO_INDENT_FALLBACK));
+                curFOP = ed.getOption(optIndex("formatOnPaste", EOPT_FORMAT_ON_PASTE_FALLBACK));
+            } catch (e) { /* older api */ }
             if (curAI !== wantAI || curFOP !== wantFOP) {
                 ed.updateOptions({ autoIndent: isPy ? "advanced" : "full", formatOnPaste: wantFOP });
             }
@@ -728,21 +744,26 @@ function setupPythonPasteIndentFix(projectView: pxt.editor.IProjectView) {
         }
     };
 
-    // Primary path: pxt's text editor. Poll because it's created lazily and can
-    // be recreated; hookEditor is a no-op once a given instance is hooked.
+    // Primary path: pxt's text editor is created lazily, so poll for it — but
+    // only until it's hooked, then stop. Any later re-creation is caught by the
+    // onDidCreateEditor subscription below (which is live by then), so we don't
+    // need to keep polling for the lifetime of the page.
     const pv: any = projectView;
     if (pv) {
-        setInterval(() => {
+        const poll = setInterval(() => {
             try {
                 const te = pv.textEditor;
-                if (te && te.editor) hookEditor(te.editor);
+                if (te && te.editor) {
+                    hookEditor(te.editor);
+                    if (te.editor._ssPasteHooked) clearInterval(poll);
+                }
             } catch (e) {
                 pxt.debug("paste-fix projectView poll failed: " + e);
             }
         }, 500);
     }
 
-    // Best-effort secondary path: future editors via onDidCreateEditor.
+    // Secondary path: catch (re-)created editors via onDidCreateEditor.
     let attempts = 0;
     const trySubscribe = () => {
         const monaco = win.monaco;
