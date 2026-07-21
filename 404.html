@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<!--
+  Deployed to the root of the Cloudflare Pages output (built/packaged) by the
+  Pages build command. Its presence switches Cloudflare Pages from SPA-fallback
+  mode (which serves index.html with HTTP 200 for every missing path) to real
+  HTTP 404 responses. The MakeCode webapp requires a real 404 for missing
+  /hexcache/<sha>.hex files so it falls through to the cloud compile service;
+  a 200 HTML response gets parsed as a hex image and breaks downloads for any
+  extension containing C++ (e.g. Cutebot) with "Compilation failed".
+-->
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Not found</title>
+</head>
+<body>
+    <h1>404 &mdash; Not found</h1>
+    <p>The requested file does not exist.</p>
+</body>
+</html>
