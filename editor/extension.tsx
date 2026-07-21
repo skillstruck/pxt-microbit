@@ -54,6 +54,7 @@ pxt.editor.initExtensionsAsync = function (opts: pxt.editor.ExtensionOptions): P
     setupPythonPasteIndentFix(opts.projectView);
     // Fire-and-forget; we don't want to block extension init on cache cleanup.
     purgePoisonedScriptCacheAsync().catch(e => pxt.debug("purgePoisonedScriptCacheAsync failed: " + e));
+    purgePoisonedHexCacheAsync().catch(e => pxt.debug("purgePoisonedHexCacheAsync failed: " + e));
 
     return Promise.resolve<pxt.editor.ExtensionResult>(res);
 }
@@ -884,6 +885,97 @@ function setupPythonPasteIndentFix(projectView: pxt.editor.IProjectView) {
 // installs that ran against the broken proxy before the fallback shipped.
 // One-time cleanup per page load; on subsequent loads the cache is clean
 // and we're a no-op.
+// Skill Struck: scan IndexedDB on init and delete compiled-hex cache entries
+// ("hex-<sha256>" docs in the "hostcache" store) that hold HTML instead of a
+// hex image. Before the static host served real 404s for missing
+// /hexcache/<sha>.hex files, its SPA fallback returned index.html with 200 and
+// pxt.hexloader persisted that HTML under the extension's sha. The cache has
+// no expiry and is consulted before any network request, so every affected
+// browser kept failing with "No hex start" even after the server was fixed.
+// Deleting the entry is always safe: the next download simply re-fetches from
+// the (now working) hexcache/cloud-compile path.
+async function purgePoisonedHexCacheAsync(): Promise<void> {
+    if (typeof indexedDB === "undefined" || !(indexedDB as any).databases) return;
+    let dbInfos: { name?: string }[];
+    try {
+        dbInfos = await (indexedDB as any).databases();
+    } catch (e) {
+        pxt.debug("indexedDB.databases() failed: " + e);
+        return;
+    }
+    // Same PXT-ownership heuristic as purgePoisonedScriptCacheAsync: the
+    // "hostcache" table only exists alongside pxt-core's other stores.
+    const PXT_COMPANION_STORES = ["texts", "headers", "github", "script"];
+    const HEX_KEY = /^hex-[0-9a-f]{64}$/;
+    const isPoisoned = (val: unknown): boolean => {
+        if (typeof val !== "string") return true;
+        if (/<!doctype|<html/i.test(val)) return true;
+        let meta: { hex?: unknown };
+        try {
+            meta = JSON.parse(val);
+        } catch (e) {
+            return true;
+        }
+        const hex = meta && meta.hex;
+        return !Array.isArray(hex)
+            || hex.length === 0
+            || typeof hex[0] !== "string"
+            || hex[0].charAt(0) === "<";
+    };
+    for (const info of dbInfos) {
+        if (!info.name) continue;
+        await new Promise<void>((resolve) => {
+            const openReq = indexedDB.open(info.name!);
+            openReq.onsuccess = () => {
+                const db = openReq.result;
+                if (!db.objectStoreNames.contains("hostcache")) {
+                    db.close();
+                    resolve();
+                    return;
+                }
+                const hasPxtCompanion = PXT_COMPANION_STORES.some(s => db.objectStoreNames.contains(s));
+                if (!hasPxtCompanion) {
+                    pxt.debug(`skipping non-PXT db with 'hostcache' store: ${info.name}`);
+                    db.close();
+                    resolve();
+                    return;
+                }
+                let tx: IDBTransaction;
+                try {
+                    tx = db.transaction("hostcache", "readwrite");
+                } catch (e) {
+                    db.close();
+                    resolve();
+                    return;
+                }
+                const store = tx.objectStore("hostcache");
+                const cursorReq = store.openCursor();
+                let purged = 0;
+                cursorReq.onsuccess = () => {
+                    const cursor = cursorReq.result;
+                    if (cursor) {
+                        const value = cursor.value;
+                        const id = value && value.id;
+                        if (typeof id === "string" && HEX_KEY.test(id) && isPoisoned(value.val)) {
+                            cursor.delete();
+                            purged++;
+                        }
+                        cursor.continue();
+                    } else {
+                        if (purged > 0) pxt.debug(`purged ${purged} poisoned hex-cache entries from ${info.name}`);
+                        db.close();
+                        resolve();
+                    }
+                };
+                cursorReq.onerror = () => { db.close(); resolve(); };
+                tx.onerror = () => { try { db.close(); } catch { } resolve(); };
+            };
+            openReq.onerror = () => resolve();
+            openReq.onblocked = () => resolve();
+        });
+    }
+}
+
 async function purgePoisonedScriptCacheAsync(): Promise<void> {
     if (typeof indexedDB === "undefined" || !(indexedDB as any).databases) return;
     let dbInfos: { name?: string }[];
