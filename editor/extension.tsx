@@ -615,6 +615,11 @@ function setupCustomConflictDetection() {
     // (case-insensitive). Add more groups here as new pairs surface.
     const MUTUALLY_EXCLUSIVE_GROUPS: string[][] = [
         ["cutebot", "pxt-cutebotpro"],
+        // microsoft/pxt-sonar and DFRobot/pxt-maqueen both declare a top-level
+        // `enum PingUnit` (TS2300 Duplicate identifier 'Centimeters'), and
+        // maqueen ships its own ultrasonic block. Lesson projects reference the
+        // sonar package under the id "sonar"; its pxt.json name is "pxt-sonar".
+        ["maqueen", "sonar", "pxt-sonar"],
     ];
 
     const findGroup = (pkgName: string): string[] | undefined => {
