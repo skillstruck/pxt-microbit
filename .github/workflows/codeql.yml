@@ -3,14 +3,20 @@ name: "Code scanning - action"
 on:
   push:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   schedule:
     - cron: '0 19 * * 0'
 
 permissions:
   security-events: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   CodeQL-Build:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
 
     # CodeQL runs on ubuntu-latest and windows-latest
     runs-on: ubuntu-latest

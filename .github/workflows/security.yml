@@ -2,6 +2,7 @@ name: Security
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     branches:
       - dev
       - feat/**
@@ -14,8 +15,13 @@ permissions:
   pull-requests: write
 
 # Since pxt-microbit is a public fork of pxt-core, we need to use a custom Semgrep config instead of the reusable one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   semgrep:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     name: Semgrep
     permissions:
       contents: read
